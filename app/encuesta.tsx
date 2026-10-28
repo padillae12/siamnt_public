@@ -1,0 +1,671 @@
+// @ts-nocheck
+import { actualizarEstadoCerradoPorCliente, actualizarFase2Reporte, guardarEncuestaSatisfaccion } from '@/lib/reportes';
+import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useEffect, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  Modal,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  useWindowDimensions,
+  View,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+
+const OPCIONES_ESTANDAR = ['EXCELENTE', 'MUY BUENO', 'BUENO', 'REGULAR', 'MALO'];
+
+const PREGUNTAS = [
+  {
+    id: 1,
+    texto: 'EL TRATO RECIBIDO POR EL EQUIPO TECNICO DE SI MANT ME PARECIO: ',
+    key: 'trato_equipo',
+    opciones: OPCIONES_ESTANDAR
+  },
+  {
+    id: 2,
+    texto: '¿EL PERSONAL TÉCNICO DE SI MANT SE PRESENTÓ Y EXPLICÓ EL MOTIVO DE LA VISITA?',
+    key: 'presentacion_motivo',
+    opciones: ['SI LO REALIZÓ', 'NO LO REALIZÓ']
+  },
+  {
+    id: 3,
+    texto: '¿EL EQUIPO TÉCNICO DE SI MANT RESOLVIÓ EL PROBLEMA O REALIZÓ LA TAREA PARA LA CUAL REALIZÓ LA VISITA A SU SUCURSAL?',
+    key: 'equipo_tecnico',
+    opciones: ['SÍ LO HIZO', 'NO LO HIZO', 'NO ESTOY SEGURA/O']
+  },
+  {
+    id: 4,
+    texto: 'EL PERSONAL ADMINISTRATIVO QUE RECIBE MI SOLICITUD ME ATIENDE DE FORMA:',
+    key: 'personal_administrativo',
+    opciones: OPCIONES_ESTANDAR
+  },
+  {
+    id: 5,
+    texto: 'LA RAPIDEZ EN LA RESOLUCIÓN DEL PROBLEMA FUE:',
+    key: 'rapidez',
+    opciones: OPCIONES_ESTANDAR
+  },
+  {
+    id: 6,
+    texto: '¿EL PERSONAL TÉCNICO DE SI MANT, AL TERMINAR CON SUS ACTIVIDADES AVISÓ QUE SE RETIRABA DEL SITIO Y EXPLICÓ LO REALIZADO DURANTE LA VISITA Y/O EXPLICÓ EL PROBLEMA ENCONTRADO?',
+    key: 'aviso_retiro',
+    opciones: ['SÍ LO HIZO', 'NO LO HIZO', 'SÍ LO HIZO, PERO NO FUE CLARO', 'NO LE DI EL TIEMPO PARA QUE ME EXPLICARA']
+  },
+  {
+    id: 7,
+    texto: 'EL COSTO DEL SERVICIO EN RELACIÓN A LA CALIDAD FUE:',
+    key: 'costo_calidad',
+    opciones: OPCIONES_ESTANDAR
+  },
+  {
+    id: 8,
+    texto: '¿QUÉ TAN SATISFECHO ESTÁ CON LA SOLUCIÓN PROPORCIONADA?',
+    key: 'satisfaccion',
+    opciones: ['MUY SATISFECHA/O', 'SATISFECHA/O', 'PARCIALMENTE SATISFECHA/O', 'NADA SATISFECHA/O']
+  },
+];
+
+export default function EncuestaPage() {
+  const router = useRouter();
+  const { width } = useWindowDimensions();
+  const isMobile = width < 768;
+  const fontFamily = Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif';
+  const params = useLocalSearchParams();
+
+  const [respuestas, setRespuestas] = useState<{ [key: string]: string }>({});
+  const [guardando, setGuardando] = useState(false);
+  const [enviado, setEnviado] = useState(false);
+  const [usuario, setUsuario] = useState<any>(null);
+
+  useEffect(() => {
+    const cargarUsuario = async () => {
+      try {
+        const usuarioJson = await AsyncStorage.getItem('usuario_empleado');
+        setUsuario(usuarioJson ? JSON.parse(usuarioJson) : null);
+      } catch (error) {
+        console.error('Error al cargar usuario:', error);
+      }
+    };
+    cargarUsuario();
+  }, []);
+
+  const todasLasRespuestasLlenas = PREGUNTAS.every(p => respuestas[p.key]);
+
+  const handleGuardarEncuesta = async () => {
+    if (!todasLasRespuestasLlenas) {
+      Alert.alert('Validación requerida', 'Por favor responde todas las preguntas. Esta encuesta es obligatoria para cerrar el reporte.');
+      return;
+    }
+
+    setGuardando(true);
+    try {
+      const reporteId = params.reporteId as string;
+      let fase2Data = {};
+
+      // Parsear fase2Data solo si existe
+      if (params.fase2Data) {
+        try {
+          fase2Data = JSON.parse(params.fase2Data as string);
+        } catch (e) {
+          console.warn('No se pudo parsear fase2Data, continuando con objeto vacío');
+          fase2Data = {};
+        }
+      }
+
+      // Obtener datos del cliente y empleado desde los params
+      const clienteEmail = params.clienteEmail as string || '';
+      const clienteNombre = params.clienteNombre as string || '';
+      const empresa = params.empresa as string || '';
+      const empleadoEmail = params.empleadoEmail as string || '';
+      const empleadoNombre = params.empleadoNombre as string || '';
+
+      console.log('Iniciando guardado de encuesta...');
+      console.log('reporteId:', reporteId);
+      console.log('usuario:', usuario);
+      console.log('cliente:', { email: clienteEmail, nombre: clienteNombre, empresa });
+      console.log('empleado:', { email: empleadoEmail, nombre: empleadoNombre });
+
+      // Preparar datos de encuesta
+      const encuestaData = {
+        reporte_id: reporteId,
+        cliente_email: clienteEmail,
+        cliente_nombre: clienteNombre,
+        empleado_email: empleadoEmail || usuario?.email || '',
+        empleado_nombre: empleadoNombre || usuario?.nombre || '',
+        empresa: empresa,
+        trato_equipo: respuestas['trato_equipo'],
+        presentacion_motivo: respuestas['presentacion_motivo'],
+        equipo_tecnico: respuestas['equipo_tecnico'],
+        personal_administrativo: respuestas['personal_administrativo'],
+        rapidez: respuestas['rapidez'],
+        aviso_retiro: respuestas['aviso_retiro'],
+        costo_calidad: respuestas['costo_calidad'],
+        satisfaccion: respuestas['satisfaccion'],
+      };
+
+      // Actualizar Fase 2 con datos guardados
+      console.log('Actualizando Fase 2...');
+      const resultadoFase2 = await actualizarFase2Reporte(reporteId, {
+        ...fase2Data,
+        trabajo_completado: true,
+      });
+
+      if (!resultadoFase2.success) {
+        throw new Error(resultadoFase2.error || 'No se pudo guardar Fase 2');
+      }
+
+      console.log('Fase 2 actualizada');
+
+      // Guardar encuesta en tabla separada
+      console.log('Guardando encuesta en BD...');
+      const resultadoEncuesta = await guardarEncuestaSatisfaccion(encuestaData);
+
+      if (!resultadoEncuesta.success) {
+        console.error('Fallo al guardar encuesta:', resultadoEncuesta.error);
+        throw new Error(resultadoEncuesta.error || 'No se pudo guardar la encuesta');
+      }
+
+      console.log('Encuesta guardada correctamente');
+
+      // PASO 5: Cambiar estado a "cerrado_por_cliente" (cierre definitivo)
+      console.log('Cambiando estado a cerrado_por_cliente...');
+      const resultadoEstado = await actualizarEstadoCerradoPorCliente(reporteId);
+
+      if (!resultadoEstado.success) {
+        throw new Error(resultadoEstado.error || 'No se pudo marcar el reporte como cerrado');
+      }
+
+      console.log('Reporte cerrado por cliente - CIERRE DEFINITIVO');
+      console.log('Encuesta finalizada correctamente');
+
+      setGuardando(false);
+      setEnviado(true);
+
+      // Auto-redirigir después de 4 segundos
+      setTimeout(() => {
+        router.replace('/cliente-panel');
+      }, 4000);
+
+    } catch (error: any) {
+      console.error('Error al guardar encuesta:', error);
+      console.error('Error details:', error.message);
+      setGuardando(false);
+      Alert.alert('Error', `Hubo un problema: ${error.message}`);
+    }
+  };
+
+  const handleSeleccionar = (preguntaKey: string, opcion: string) => {
+    setRespuestas(prev => ({
+      ...prev,
+      [preguntaKey]: opcion
+    }));
+  };
+
+  return (
+    <SafeAreaView style={[styles.safeArea, { backgroundColor: '#0f172a' }]}>
+      <View style={styles.header}>
+        <TouchableOpacity onPress={() => router.replace('/cliente-panel')} activeOpacity={0.7}>
+          <Ionicons name="arrow-back" size={24} color="#22d3ee" />
+        </TouchableOpacity>
+        <View style={styles.headerContent}>
+          <Text style={[styles.headerTitle, { fontFamily }]}>Encuesta de Satisfacción</Text>
+          <Text style={[styles.headerSubtitle, { fontFamily }]}>Por favor ayúdanos a mejorar</Text>
+        </View>
+      </View>
+
+      <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
+        <View style={[styles.content, isMobile && styles.contentMobile]}>
+          {/* Mensaje introductorio y observaciones */}
+          <View style={{
+            backgroundColor: '#06b6d415',
+            borderRadius: 12,
+            padding: 16,
+            marginBottom: 24,
+            borderLeftWidth: 4,
+            borderLeftColor: '#06b6d4'
+          }}>
+            <Text style={[styles.headerSubtitle, { fontFamily, color: '#22d3ee', marginBottom: 8, fontWeight: '700' }]}>
+              TU RESPUESTA AYUDA A MEJORAR NUESTRO SERVICIO, MUCHAS GRACIAS
+            </Text>
+            <Text style={[styles.preguntaTexto, { fontFamily, color: '#cbd5e1', fontSize: 13 }]}>
+              SI TU NO ESTUVISTE PRESENTE DURANTE LA VISITA, FAVOR DE CONSULTAR CON EL PERSONAL DE TU SUCURSAL QUE SI ESTUVO PRESENTE PARA CONTESTAR DE MEJOR MANERA LA ENCUESTA.
+            </Text>
+          </View>
+
+          {PREGUNTAS.map((pregunta, idx) => (
+            <View key={pregunta.id} style={styles.preguntaContainer}>
+              <View style={styles.preguntaHeader}>
+                <View style={styles.numeroCircle}>
+                  <Text style={[styles.numeroText, { fontFamily }]}>{pregunta.id}</Text>
+                </View>
+                <Text style={[styles.preguntaTexto, { fontFamily }]}>{pregunta.texto}</Text>
+              </View>
+
+              <View style={styles.opcionesContainer}>
+                {pregunta.opciones.map((opcion) => {
+                  const isSelected = respuestas[pregunta.key] === opcion;
+                  return (
+                    <TouchableOpacity
+                      key={opcion}
+                      style={[
+                        styles.opcion,
+                        isSelected && styles.opcionSelected,
+                        {
+                          borderColor: isSelected ? '#22d3ee' : '#475569',
+                          backgroundColor: isSelected ? '#22d3ee15' : 'transparent',
+                        }
+                      ]}
+                      onPress={() => handleSeleccionar(pregunta.key, opcion)}
+                      activeOpacity={0.7}
+                    >
+                      <View style={[
+                        styles.checkbox,
+                        isSelected && styles.checkboxSelected,
+                        { borderColor: isSelected ? '#22d3ee' : '#64748b' }
+                      ]}>
+                        {isSelected && (
+                          <Ionicons name="checkmark" size={16} color="#22d3ee" />
+                        )}
+                      </View>
+                      <Text style={[
+                        styles.opcionTexto,
+                        { fontFamily },
+                        isSelected && styles.opcionTextoSelected
+                      ]}>
+                        {opcion}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+          ))}
+
+          <View style={styles.progressBar}>
+            <View
+              style={[
+                styles.progressFill,
+                {
+                  width: `${(Object.keys(respuestas).length / PREGUNTAS.length) * 100}%`,
+                },
+              ]}
+            />
+          </View>
+          <Text style={[styles.progressText, { fontFamily }]}>
+            {Object.keys(respuestas).length} de {PREGUNTAS.length} preguntas respondidas
+          </Text>
+        </View>
+      </ScrollView>
+
+      <View style={[styles.footer, isMobile && styles.footerMobile]}>
+        <TouchableOpacity
+          style={[styles.cancelButton, isMobile && styles.buttonMobile]}
+          onPress={() => router.replace('/cliente-panel')}
+          activeOpacity={0.7}
+        >
+          <Text style={[styles.cancelButtonText, { fontFamily }]}>Cancelar</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[
+            styles.submitButton,
+            isMobile && styles.buttonMobile,
+            !todasLasRespuestasLlenas && styles.submitButtonDisabled
+          ]}
+          onPress={handleGuardarEncuesta}
+          activeOpacity={0.7}
+          disabled={!todasLasRespuestasLlenas || guardando}
+        >
+          <Text style={[styles.submitButtonText, { fontFamily }]}>
+            {guardando ? 'Guardando...' : 'Enviar Encuesta'}
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Pantalla de carga - bloquea toda interacción mientras se envía */}
+      <Modal
+        visible={guardando}
+        transparent={true}
+        animationType="fade"
+        statusBarTranslucent={true}
+      >
+        <View style={styles.loadingOverlay}>
+          <View style={styles.loadingCard}>
+            <ActivityIndicator size="large" color="#22d3ee" style={{ marginBottom: 20 }} />
+            <Ionicons name="cloud-upload-outline" size={48} color="#22d3ee" style={{ marginBottom: 16 }} />
+            <Text style={[styles.loadingTitle, { fontFamily }]}>Enviando encuesta...</Text>
+            <Text style={[styles.loadingSubtitle, { fontFamily }]}>
+              Por favor no cierres ni cambies de pantalla.{'\n'}Esto puede tardar unos segundos.
+            </Text>
+            <View style={styles.loadingDotsContainer}>
+              <View style={[styles.loadingDot, { backgroundColor: '#22d3ee' }]} />
+              <View style={[styles.loadingDot, { backgroundColor: '#06b6d4', opacity: 0.7 }]} />
+              <View style={[styles.loadingDot, { backgroundColor: '#0891b2', opacity: 0.4 }]} />
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Pantalla de éxito - se muestra después de enviar */}
+      <Modal
+        visible={enviado}
+        transparent={true}
+        animationType="fade"
+        statusBarTranslucent={true}
+      >
+        <View style={styles.loadingOverlay}>
+          <View style={styles.successCard}>
+            <View style={styles.successIconCircle}>
+              <Ionicons name="checkmark-circle" size={72} color="#10b981" />
+            </View>
+            <Text style={[styles.successTitle, { fontFamily }]}>¡Encuesta Enviada!</Text>
+            <Text style={[styles.successMessage, { fontFamily }]}>
+              Gracias por confiar en SI MANT.{"\n"}Tu opinión es muy importante para nosotros y nos ayuda a seguir mejorando nuestro servicio.
+            </Text>
+            <View style={styles.successDivider} />
+            <Text style={[styles.successFooter, { fontFamily }]}>
+              Serás redirigido automáticamente...
+            </Text>
+            <TouchableOpacity
+              style={styles.successButton}
+              onPress={() => router.replace('/cliente-panel')}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="home-outline" size={18} color="#fff" style={{ marginRight: 8 }} />
+              <Text style={[styles.successButtonText, { fontFamily }]}>Ir al Panel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: '#0f172a',
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1e293b',
+    gap: 12,
+  },
+  headerContent: {
+    flex: 1,
+  },
+  headerTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#fff',
+  },
+  headerSubtitle: {
+    fontSize: 13,
+    color: '#94a3b8',
+    marginTop: 2,
+  },
+  scroll: {
+    flex: 1,
+  },
+  content: {
+    paddingHorizontal: 24,
+    paddingVertical: 24,
+  },
+  contentMobile: {
+    paddingHorizontal: 16,
+  },
+  preguntaContainer: {
+    marginBottom: 28,
+    backgroundColor: '#1e293b',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  preguntaHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 16,
+    gap: 12,
+  },
+  numeroCircle: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#22d3ee15',
+    borderWidth: 1,
+    borderColor: '#22d3ee',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  numeroText: {
+    color: '#22d3ee',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  preguntaTexto: {
+    flex: 1,
+    color: '#f1f5f9',
+    fontSize: 15,
+    fontWeight: '600',
+    lineHeight: 22,
+  },
+  opcionesContainer: {
+    gap: 10,
+  },
+  opcion: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 8,
+    borderWidth: 1.5,
+  },
+  opcionSelected: {
+    backgroundColor: '#22d3ee15',
+  },
+  checkbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 4,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  checkboxSelected: {
+    backgroundColor: '#22d3ee',
+    borderColor: '#22d3ee',
+  },
+  opcionTexto: {
+    color: '#cbd5e1',
+    fontSize: 14,
+    flex: 1,
+  },
+  opcionTextoSelected: {
+    color: '#22d3ee',
+    fontWeight: '600',
+  },
+  progressBar: {
+    height: 6,
+    backgroundColor: '#1e293b',
+    borderRadius: 3,
+    overflow: 'hidden',
+    marginTop: 24,
+    marginBottom: 12,
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: '#10b981',
+  },
+  progressText: {
+    color: '#94a3b8',
+    fontSize: 12,
+    textAlign: 'center',
+  },
+  footer: {
+    flexDirection: 'row',
+    gap: 12,
+    paddingHorizontal: 24,
+    paddingVertical: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#1e293b',
+  },
+  footerMobile: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  cancelButton: {
+    flex: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    backgroundColor: '#475569',
+    alignItems: 'center',
+  },
+  submitButton: {
+    flex: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    backgroundColor: '#10b981',
+    alignItems: 'center',
+  },
+  submitButtonDisabled: {
+    backgroundColor: '#64748b',
+    opacity: 0.6,
+  },
+  cancelButtonText: {
+    color: '#f1f5f9',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  submitButtonText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  buttonMobile: {
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+  loadingOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.92)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingCard: {
+    backgroundColor: '#1e293b',
+    borderRadius: 20,
+    padding: 40,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#334155',
+    maxWidth: 320,
+    width: '85%',
+    shadowColor: '#22d3ee',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.15,
+    shadowRadius: 30,
+    elevation: 20,
+  },
+  loadingTitle: {
+    color: '#f1f5f9',
+    fontSize: 20,
+    fontWeight: '700',
+    marginBottom: 10,
+    textAlign: 'center',
+  },
+  loadingSubtitle: {
+    color: '#94a3b8',
+    fontSize: 14,
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 20,
+  },
+  loadingDotsContainer: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  loadingDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  successCard: {
+    backgroundColor: '#1e293b',
+    borderRadius: 24,
+    padding: 36,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#10b98140',
+    maxWidth: 360,
+    width: '88%',
+    shadowColor: '#10b981',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.2,
+    shadowRadius: 40,
+    elevation: 25,
+  },
+  successIconCircle: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: '#10b98115',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 20,
+  },
+  successTitle: {
+    color: '#10b981',
+    fontSize: 24,
+    fontWeight: '800',
+    marginBottom: 14,
+    textAlign: 'center',
+  },
+  successMessage: {
+    color: '#cbd5e1',
+    fontSize: 15,
+    textAlign: 'center',
+    lineHeight: 22,
+    marginBottom: 20,
+  },
+  successDivider: {
+    width: '60%',
+    height: 1,
+    backgroundColor: '#334155',
+    marginBottom: 16,
+  },
+  successFooter: {
+    color: '#64748b',
+    fontSize: 12,
+    marginBottom: 20,
+    textAlign: 'center',
+  },
+  successButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#10b981',
+    paddingVertical: 14,
+    paddingHorizontal: 28,
+    borderRadius: 12,
+    width: '100%',
+  },
+  successButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+});

@@ -1,0 +1,5237 @@
+// @ts-nocheck
+import CustomDatePicker from '@/components/CustomDatePicker';
+import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFocusEffect } from '@react-navigation/native';
+import * as FileSystem from 'expo-file-system';
+import { LinearGradient } from 'expo-linear-gradient';
+import * as Print from 'expo-print';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import * as Sharing from 'expo-sharing';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Animated, Easing, Image, Linking, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { PDF_TEMPLATE_BASE64 } from '../constants/pdf-templates';
+import {
+  actualizarReporteBackend,
+  apiCall,
+  getApiBaseUrl,
+  obtenerArchivosReporteBackend,
+  obtenerReportesCliente,
+  verificarEncuestaExiste
+} from '../lib/api-backend';
+import { getProxyUrl } from '../lib/cloudflare';
+import { matchesSearchDate } from '../lib/date-utils';
+import { obtenerNombreEstado } from '../lib/estado-mapeo';
+
+type Cliente = {
+  nombre?: string;
+  apellido?: string;
+  email?: string;
+  empresa?: string;
+};
+
+function ClientePanelContent() {
+  const router = useRouter();
+  const params = useLocalSearchParams();
+  const { width } = useWindowDimensions();
+  const isMobile = width < 768;
+  const fontFamily = Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif';
+  const consoleLog = console.log;
+  const consoleWarn = console.warn;
+  const logDebug = (...args: any[]) => {
+    if (__DEV__) {
+      consoleLog(...args);
+    }
+  };
+  const logWarn = (...args: any[]) => {
+    if (__DEV__) {
+      consoleWarn(...args);
+    }
+  };
+  const [usuario, setUsuario] = useState<Cliente | null>(null);
+  // Contadores dinámicos se calculan a partir de "reportes"
+  const [showLogout, setShowLogout] = useState(false);
+  const [showSuccessOverlay, setShowSuccessOverlay] = useState(false);
+  const [showReportModal, setShowReportModal] = useState(false);
+  const [showSeguimientoModal, setShowSeguimientoModal] = useState(false);
+  const [showReporteDetail, setShowReporteDetail] = useState(false);
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [passwordForm, setPasswordForm] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: ''
+  });
+  const [passwordErrors, setPasswordErrors] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: '',
+    general: ''
+  });
+  const [loadingPassword, setLoadingPassword] = useState(false);
+  const [selectedReporte, setSelectedReporte] = useState<any | null>(null);
+  const [archivosReporte, setArchivosReporte] = useState<any[]>([]);
+  const [loadingArchivos, setLoadingArchivos] = useState(false);
+  const [archivoVisualizando, setArchivoVisualizando] = useState<any | null>(null);
+  const [showArchivoModal, setShowArchivoModal] = useState(false);
+  const [reportes, setReportes] = useState<any[]>([]);
+  const [loadingReportes, setLoadingReportes] = useState(false);
+  const [errorReportes, setErrorReportes] = useState('');
+  const [showStats, setShowStats] = useState(true);
+  const [filtroEstado, setFiltroEstado] = useState<string[]>([]);
+  const [filtroPrioridad, setFiltroPrioridad] = useState<string[]>([]);
+  const [showFiltros, setShowFiltros] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filtroID, setFiltroID] = useState('');
+  const [filtroFecha, setFiltroFecha] = useState('');
+
+  // PASO 4: Nuevos estados para reportes finalizados por técnico
+  const [reportesFinalizados, setReportesFinalizados] = useState<any[]>([]);
+  const [showConfirmarFinalizacionModal, setShowConfirmarFinalizacionModal] = useState(false);
+  const [reporteAConfirmar, setReporteAConfirmar] = useState<any | null>(null);
+  const [confirmandoFinalizacion, setConfirmandoFinalizacion] = useState(false);
+
+  // Estado para TODOS los reportes (sin filtrar) - usado para contadores
+  const [todosLosReportes, setTodosLosReportes] = useState<any[]>([]);
+
+  // Estados para cotizaciones
+  const [showCotizacionesModal, setShowCotizacionesModal] = useState(false);
+  const [cotizaciones, setCotizaciones] = useState<any[]>([]);
+  const [loadingCotizaciones, setLoadingCotizaciones] = useState(false);
+  const [cotizacionSeleccionada, setCotizacionSeleccionada] = useState<any | null>(null);
+  const [showCotizacionDetalleModal, setShowCotizacionDetalleModal] = useState(false);
+  const [toastMessage, setToastMessage] = useState('');
+  const [toastType, setToastType] = useState<'success' | 'error' | 'info' | 'warning'>('info');
+  const [generandoPDF, setGenerandoPDF] = useState(false);
+  const [archivoPDFCotizacion, setArchivoPDFCotizacion] = useState<any | null>(null);
+  const [archivosCotizacion, setArchivosCotizacion] = useState<any[]>([]);
+  const [loadingArchivosCotizacion, setLoadingArchivosCotizacion] = useState(false);
+
+  const [encuestasEnviadas, setEncuestasEnviadas] = useState<Set<number>>(new Set());
+  // Estado para rastrear encuestas confirmadas en BD
+  const [encuestasRespondidas, setEncuestasRespondidas] = useState<Set<number>>(new Set());
+  // Cache local para reportes cancelados por segunda cotizacion
+  const [canceladosLocal, setCanceladosLocal] = useState<Set<number>>(new Set());
+  // Modal de éxito para encuesta
+  const [showEncuestaSuccessModal, setShowEncuestaSuccessModal] = useState(false);
+
+  // Efecto para rotar pantalla en móvil al abrir modal de archivo
+  // Helper para formatear precio con comas y moneda
+  const formatDisplayPrice = (precio: any, moneda: string = '') => {
+    if (precio === undefined || precio === null || isNaN(parseFloat(precio))) return 'N/A';
+    const num = parseFloat(precio);
+    const formattedNum = num.toLocaleString('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+    return `$${formattedNum} ${moneda || 'MXN'}`;
+  };
+
+  // Estado para confirmación de rechazo (custom modal)
+  const [showConfirmarRechazoModal, setShowConfirmarRechazoModal] = useState(false);
+  const [reporteARechazar, setReporteARechazar] = useState<any | null>(null);
+  const [stepRechazo, setStepRechazo] = useState(1); // 1: confirmación, 2: motivo
+  const [motivoRechazo, setMotivoRechazo] = useState('');
+  const [rechazandoReporte, setRechazandoReporte] = useState(false);
+
+
+  // Cargar encuestas enviadas desde AsyncStorage al iniciar
+  useEffect(() => {
+    const cargarEncuestasEnviadas = async () => {
+      try {
+        const stored = await AsyncStorage.getItem('encuestas_enviadas');
+        if (stored) {
+          const ids = JSON.parse(stored);
+          setEncuestasEnviadas(new Set(ids));
+        }
+      } catch (e) {
+        console.error('Error al cargar encuestas enviadas:', e);
+      }
+    };
+    cargarEncuestasEnviadas();
+  }, []);
+
+  useEffect(() => {
+    const cargarCanceladosLocal = async () => {
+      try {
+        const stored = await AsyncStorage.getItem('reportes_cancelados_local');
+        if (stored) {
+          const ids = JSON.parse(stored);
+          setCanceladosLocal(new Set(ids));
+        }
+      } catch (e) {
+        console.error('Error al cargar cancelados local:', e);
+      }
+    };
+    cargarCanceladosLocal();
+  }, []);
+
+
+  useEffect(() => {
+    const obtenerUsuario = async () => {
+      try {
+        const user = await AsyncStorage.getItem('user');
+        if (user) {
+          const parsedUser = JSON.parse(user);
+          // Validación: solo clientes pueden acceder a este panel
+          if (parsedUser.rol !== 'cliente') {
+            logWarn(`[SEGURIDAD] Usuario ${parsedUser.email} con rol ${parsedUser.rol} intentó acceder a /cliente-panel. Redirigiendo...`);
+            // Redirigir según su rol
+            switch (parsedUser.rol) {
+              case 'admin':
+                router.replace('/admin');
+                break;
+              case 'empleado':
+                router.replace('/empleado-panel');
+                break;
+              default:
+                router.replace('/');
+            }
+            return;
+          }
+          setUsuario(parsedUser);
+        }
+      } catch (error) {
+        console.error('[CLIENTE-PANEL] Error al obtener usuario:', error);
+      }
+    };
+    obtenerUsuario();
+  }, []);
+
+  // Detectar si se envió una encuesta y mostrar mensaje de agradecimiento
+  // Detectar si se envió una encuesta y mostrar mensaje de agradecimiento
+  useEffect(() => {
+    const checkEncuestaEnviada = async () => {
+      // En móvil, obtenemos los parámetros de la navegación o deep linking
+      // Para simplificar y mantener compatibilidad web/móvil:
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        const urlParams = new URLSearchParams(window.location.search);
+        const reporteId = urlParams.get('reporteId');
+
+        if (urlParams.get('encuestaEnviada') === 'true' && reporteId) {
+          try {
+            const stored = await AsyncStorage.getItem('encuestas_enviadas');
+            const ids = stored ? JSON.parse(stored) : [];
+            const reporteIdNum = parseInt(reporteId);
+
+            if (!ids.includes(reporteIdNum)) {
+              ids.push(reporteIdNum);
+              await AsyncStorage.setItem('encuestas_enviadas', JSON.stringify(ids));
+              setEncuestasEnviadas(new Set(ids));
+            }
+
+            setTimeout(() => {
+              setShowEncuestaSuccessModal(true);
+            }, 500);
+
+            window.history.replaceState({}, '', '/cliente-panel');
+          } catch (e) {
+            console.error('Error al guardar encuesta enviada:', e);
+          }
+        }
+      } else {
+        // Lógica para móvil (usando parámetros de ruta)
+        const reporteId = params.reporteId as string;
+        if (params.encuestaEnviada === 'true' && reporteId) {
+          try {
+            const stored = await AsyncStorage.getItem('encuestas_enviadas');
+            const ids = stored ? JSON.parse(stored) : [];
+            const reporteIdNum = parseInt(reporteId);
+
+            if (!ids.includes(reporteIdNum)) {
+              ids.push(reporteIdNum);
+              await AsyncStorage.setItem('encuestas_enviadas', JSON.stringify(ids));
+              setEncuestasEnviadas(new Set(ids));
+            }
+
+            setTimeout(() => {
+              setShowEncuestaSuccessModal(true);
+            }, 500);
+
+            // router.replace('/cliente-panel'); // Comentado para evitar recarga que cierra el modal
+
+          } catch (e) {
+            console.error('Error al guardar encuesta enviada (móvil):', e);
+          }
+        }
+      }
+    };
+
+    checkEncuestaEnviada();
+  }, [params.encuestaEnviada, params.reporteId]);
+
+  // Verificar si existen encuestas para los reportes
+  const verificarEncuestas = useCallback(
+    async (reportes: any[]) => {
+      logDebug('[VERIFICAR-ENCUESTAS] Verificando encuestas para', reportes.length, 'reportes');
+      const encuestasSet = new Set<number>();
+
+      for (const reporte of reportes) {
+        try {
+          logDebug('[VERIFICAR-ENCUESTAS] Verificando reporte ID:', reporte.id);
+          const { success, data } = await verificarEncuestaExiste(reporte.id.toString());
+          logDebug('[VERIFICAR-ENCUESTAS] Respuesta para reporte', reporte.id, ':', { success, dataLength: data?.length, data });
+          if (success && data && data.length > 0) {
+            logDebug('[VERIFICAR-ENCUESTAS] ✓ Encuesta encontrada para reporte', reporte.id);
+            encuestasSet.add(reporte.id);
+          }
+        } catch (error) {
+          console.error(`[CLIENTE-PANEL] Error verificando encuesta para reporte ${reporte.id}:`, error);
+        }
+      }
+
+      logDebug('[VERIFICAR-ENCUESTAS] Total de encuestas encontradas:', encuestasSet.size, 'IDs:', Array.from(encuestasSet));
+      setEncuestasRespondidas(encuestasSet);
+    },
+    [setEncuestasRespondidas]
+  );
+
+  const cargarReportes = useCallback(
+    async (email?: string, silent: boolean = false) => {
+      if (!email) return;
+      if (!silent) setLoadingReportes(true);
+      setErrorReportes('');
+      const { success, data, error } = await obtenerReportesCliente(email);
+      logDebug('[CLIENTE-PANEL] cargarReportes respuesta:', { success, dataLength: data?.length, firstItem: data?.[0] });
+      if (!success) {
+        setErrorReportes(error || 'No se pudieron cargar los reportes');
+      } else {
+        // Mapear los datos para extraer equipo_descripcion y comentario
+        const reportesMapeados = (data || []).map((r: any) => {
+          // El titulo tiene formato: "equipo_descripcion - sucursal"
+          const partes = (r.titulo || '').split(' - ');
+          const equipo_descripcion = partes[0] ? partes[0].trim() : 'Equipo / servicio';
+          const sucursal = partes.length > 1 ? partes[1].trim() : '';
+
+          // La descripcion tiene formato: "Modelo: xxx\nSerie: yyy\nSucursal: zzz\nComentario: aaa\nPrioridad: bbb"
+          let comentario = '';
+          const desc = r.descripcion || '';
+          const comentarioMatch = desc.match(/Comentario:\s*([^\n]+)/i);
+          if (comentarioMatch) comentario = comentarioMatch[1].trim();
+
+          const idNum = Number(r.id);
+          const esCotizacionValida = r.estado === 'cotizado' ||
+            r.estado === 'en_espera_confirmacion' ||
+            r.estado === 'en_cotizacion' ||
+            r.estado === 'revision pendiente cotizacion' ||
+            r.estado === 'revision pendiente cotizacion(nueva)' ||
+            r.estado === 'cotizacionnueva';
+
+          if (esCotizacionValida && canceladosLocal.has(idNum)) {
+            setCanceladosLocal((prev) => {
+              const next = new Set(prev);
+              next.delete(idNum);
+              AsyncStorage.setItem('reportes_cancelados_local', JSON.stringify(Array.from(next)));
+              return next;
+            });
+          }
+
+          const estadoOverride = (canceladosLocal.has(idNum) && !esCotizacionValida) ? 'rechazado' : r.estado;
+
+          return {
+            ...r,
+            estado: estadoOverride,
+            equipo_descripcion,
+            sucursal,
+            comentario: comentario || ''
+          };
+        });
+
+        const reportesActivos = reportesMapeados.filter((r: any) =>
+          r.estado !== 'cerrado' && r.estado !== 'cerrado_por_cliente' && r.estado !== 'cancelado' && r.estado !== 'rechazado'
+        );
+        logDebug('[CLIENTE-PANEL] Reportes activos después de filtrar:', reportesActivos.length);
+        logDebug('[CLIENTE-PANEL] Total de reportes (sin filtrar):', reportesMapeados.length);
+        setReportes(reportesActivos);
+        setTodosLosReportes(reportesMapeados); // Guardar TODOS los reportes para los contadores
+
+        // Verificar encuestas existentes
+        verificarEncuestas(reportesMapeados);
+      }
+      if (!silent) setLoadingReportes(false);
+      return data || [];
+    },
+    [verificarEncuestas, canceladosLocal]
+  );
+
+  const showToast = (message: string, type: 'success' | 'error' | 'info' | 'warning' = 'info') => {
+    setToastMessage(message);
+    setToastType(type);
+    setTimeout(() => setToastMessage(''), 3000);
+  };
+
+  const cargarCotizaciones = useCallback(
+    async (email?: string, silent: boolean = false) => {
+      if (!email) {
+        logDebug('[CLIENTE-PANEL] No hay email para cargar cotizaciones');
+        return;
+      }
+      logDebug('[CLIENTE-PANEL] Cargando cotizaciones para email:', email);
+      if (!silent) setLoadingCotizaciones(true);
+      try {
+        logDebug('[CLIENTE-PANEL] Llamando a obtenerReportesCliente');
+        const resultado = await obtenerReportesCliente(email);
+        logDebug('[CLIENTE-PANEL] Resultado completo:', resultado);
+        if (resultado.success && resultado.data) {
+          logDebug('[CLIENTE-PANEL] Datos cargados:', resultado.data.length);
+          logDebug('[CLIENTE-PANEL] Primeros 3 reportes:', resultado.data.slice(0, 3).map((r: any) => ({
+            id: r.id,
+            titulo: r.titulo,
+            estado: r.estado,
+            precio: r.precio_cotizacion,
+            analisis: r.analisis_general ? 'SÍ' : 'NO'
+          })));
+
+          // Filtrar reportes en proceso de cotización o ya cotizados
+          const cotizacionesFiltradas = resultado.data.filter((r: any) => {
+            const idNum = Number(r.id);
+
+            const estadoValido = r.estado === 'cotizado' ||
+              r.estado === 'en_espera_confirmacion' ||
+              r.estado === 'en_cotizacion' ||
+              r.estado === 'revision pendiente cotizacion' ||
+              r.estado === 'revision pendiente cotizacion(nueva)' ||
+              r.estado === 'cotizacionnueva';
+
+            // Si el estado es válido desde el backend, pero estaba en nuestros cancelados locales,
+            // significa que el admin lo recotizó. Lo sacamos de nuestra lista negra local.
+            if (estadoValido && canceladosLocal.has(idNum)) {
+              setCanceladosLocal((prev) => {
+                const next = new Set(prev);
+                next.delete(idNum);
+                AsyncStorage.setItem('reportes_cancelados_local', JSON.stringify(Array.from(next)));
+                return next;
+              });
+              return true; // Ya no lo filtramos
+            }
+
+            if (canceladosLocal.has(idNum)) return false;
+
+            if (!estadoValido) logDebug(`[FILTRO] Reporte ${r.id}: estado inválido (${r.estado})`);
+
+            return estadoValido;
+          });
+
+          logDebug('[CLIENTE-PANEL] Cotizaciones filtradas:', cotizacionesFiltradas.length);
+          logDebug('[CLIENTE-PANEL] Detalle cotizaciones:', cotizacionesFiltradas.map((r: any) => ({
+            id: r.id,
+            titulo: r.titulo,
+            estado: r.estado,
+            precio: r.precio_cotizacion
+          })));
+
+          // Mapear las cotizaciones igual que los reportes para extraer equipo_descripcion
+          const cotizacionesMapeadas = cotizacionesFiltradas.map((r: any) => {
+            const partes = (r.titulo || '').split(' - ');
+            const equipo_descripcion = partes[0] ? partes[0].trim() : 'Equipo / servicio';
+            const sucursal = partes.length > 1 ? partes[1].trim() : '';
+
+            let comentario = '';
+            const desc = r.descripcion || '';
+            const comentarioMatch = desc.match(/Comentario:\s*([^\n]+)/i);
+            if (comentarioMatch) comentario = comentarioMatch[1].trim();
+
+            return {
+              ...r,
+              equipo_descripcion,
+              sucursal,
+              comentario: comentario || ''
+            };
+          });
+
+          setCotizaciones(cotizacionesMapeadas);
+        } else {
+          console.error('[CLIENTE-PANEL] Error en respuesta:', resultado.error);
+          setCotizaciones([]);
+        }
+      } catch (error) {
+        console.error('[CLIENTE-PANEL] Exception:', error);
+        setCotizaciones([]);
+      } finally {
+        if (!silent) setLoadingCotizaciones(false);
+      }
+    },
+    [canceladosLocal]
+  );
+
+  // PASO 4: Cargar reportes finalizados por técnico (esperando confirmación del cliente)
+  const cargarReportesFinalizados = useCallback(
+    async (email?: string, silent: boolean = false) => {
+      if (!email) {
+        logDebug('[CLIENTE-CARGAR-FINALIZADOS] Sin email');
+        return [];
+      }
+      logDebug('[CLIENTE-CARGAR-FINALIZADOS] Iniciando carga para:', email);
+      try {
+        const resultado = await obtenerReportesCliente(email);
+        logDebug('[CLIENTE-CARGAR-FINALIZADOS] Respuesta backend:', { success: resultado.success, totalData: resultado.data?.length });
+
+        if (resultado.success && resultado.data) {
+          // FILTRO DEFENSIVO: SOLO cargar reportes que el admin CONFIRMÓ
+          // - finalizado_por_tecnico: Admin confirmó en "Confirmar Finalización"
+          // - listo_para_encuesta: Cliente confirmó, va a encuesta
+          // - encuesta_satisfaccion: Cliente completó encuesta
+          // - terminado: Completamente terminado
+
+          // EXCLUIR TODOS los demás:
+          // - cerrado_por_cliente: ❌ Técnico completó pero admin NO confirmó aún
+          // - cotizado: ❌ Admin aceptó precio pero cliente NO aceptó
+          // - pendiente: ❌ Cliente creó
+          // - en_proceso: ❌ Admin asignó, técnico trabaja
+
+          // FILTRO: SOLO mostrar reportes cerrados definitivamente
+          // - cerrado: Admin confirmó el cierre definitivo del reporte
+
+          const dataConOverride = (resultado.data || []).map((r: any) => {
+            const idNum = Number(r.id);
+            const esCotizacionValida = r.estado === 'cotizado' ||
+              r.estado === 'en_espera_confirmacion' ||
+              r.estado === 'en_cotizacion' ||
+              r.estado === 'revision pendiente cotizacion' ||
+              r.estado === 'revision pendiente cotizacion(nueva)' ||
+              r.estado === 'cotizacionnueva';
+
+            if (esCotizacionValida && canceladosLocal.has(idNum)) {
+              setCanceladosLocal((prev) => {
+                const next = new Set(prev);
+                next.delete(idNum);
+                AsyncStorage.setItem('reportes_cancelados_local', JSON.stringify(Array.from(next)));
+                return next;
+              });
+            }
+
+            return (canceladosLocal.has(idNum) && !esCotizacionValida) ? { ...r, estado: 'rechazado' } : r;
+          });
+
+          const finalizados = dataConOverride.filter((r: any) =>
+            r.estado === 'cerrado' || r.estado === 'cerrado_por_cliente' || r.estado === 'cancelado' || r.estado === 'rechazado'
+          );
+
+          logDebug('[CLIENTE-CARGAR-FINALIZADOS] Finalizados encontrados:', finalizados.length);
+          logDebug('[CLIENTE-CARGAR-FINALIZADOS] Detalles:', finalizados.map((r: any) => ({ id: r.id, estado: r.estado, titulo: r.titulo })));
+
+          // Desglosar por estado para debug
+          const porConfirmar = finalizados.filter(r => r.estado === 'finalizado_por_tecnico' || r.estado === 'listo_para_encuesta');
+          const otros = finalizados.filter(r => r.estado !== 'finalizado_por_tecnico' && r.estado !== 'listo_para_encuesta');
+          logDebug('[CLIENTE-CARGAR-FINALIZADOS] Por confirmar:', porConfirmar.length, 'Otros:', otros.length);
+          if (otros.length > 0) {
+            logDebug('[CLIENTE-CARGAR-FINALIZADOS] Estados de otros:', otros.map((r: any) => r.estado));
+          }
+
+          const finalizadosVisibles = finalizados.map((r: any) => {
+            if (r.estado === 'cancelado') {
+              return { ...r, estado: 'rechazado', esCancelado: true };
+            }
+            if (r.estado === 'rechazado') {
+              return { ...r, esCancelado: true };
+            }
+            return r;
+          });
+
+          setReportesFinalizados(finalizadosVisibles);
+          return finalizadosVisibles;
+        } else {
+          logDebug('[CLIENTE-CARGAR-FINALIZADOS] Error en respuesta:', resultado);
+          setReportesFinalizados([]);
+          return [];
+        }
+      } catch (error) {
+        console.error('[CLIENTE-CARGAR-FINALIZADOS] Error:', error);
+        setReportesFinalizados([]);
+        return [];
+      }
+    },
+    [canceladosLocal]
+  );
+
+  // Polling para actualización en tiempo real (cada 10 segundos)
+  useEffect(() => {
+    if (!usuario?.email) return;
+
+    const interval = setInterval(() => {
+      logDebug('[CLIENTE-POLLING] Actualizando datos (silent)...');
+      cargarReportes(usuario.email, true);
+      cargarCotizaciones(usuario.email, true);
+      cargarReportesFinalizados(usuario.email, true);
+    }, 10000);
+
+    return () => clearInterval(interval);
+  }, [usuario?.email, cargarReportes, cargarCotizaciones, cargarReportesFinalizados]);
+
+  // Función para generar PDF del reporte
+  const generarPDF = async (reporte: any) => {
+    if (generandoPDF) return;
+    setGenerandoPDF(true);
+    console.log('[PDF] Iniciando proceso de generación...');
+    try {
+      // Extraer información del reporte
+      const fullDescripcion = reporte.descripcion || '';
+      const modeloMatch = fullDescripcion.match(/Modelo:\s*([^\n]+)/i);
+      const serieMatch = fullDescripcion.match(/Serie:\s*([^\n]+)/i);
+      const sucursalMatch = fullDescripcion.match(/Sucursal:\s*([^\n]+)/i);
+      const comentarioMatch = fullDescripcion.match(/Comentario:\s*([\s\S]+?)(?:\nPrioridad:|$)/i);
+
+      const modeloValue = modeloMatch ? modeloMatch[1].trim() : (reporte.equipo_modelo || 'N/A');
+      const serieValue = serieMatch ? serieMatch[1].trim() : (reporte.equipo_serie || 'N/A');
+      const sucursalValue = sucursalMatch ? sucursalMatch[1].trim() : (reporte.sucursal || 'N/A');
+      const comentarioFinal = comentarioMatch ? comentarioMatch[1].trim() : (reporte.comentario || '');
+      const pdfArchivos = (archivosReporte || []).filter((a: any) => a.tipo_archivo !== 'audio');
+      const shouldBreakBeforeAttachments = pdfArchivos.length > 5;
+
+      // --- TEMPLATE COMPACTO (1 HOJA) ---
+      const htmlTemplate = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    @page { margin: 0; size: A4; }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 210mm;
+      height: 297mm;
+    }
+    body { 
+      font-family: Arial, Helvetica, sans-serif; 
+      font-size: 9px;
+      color: #1a1a1a; 
+      -webkit-print-color-adjust: exact; 
+      print-color-adjust: exact; 
+      background: #fff;
+    }
+    .background-container {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 210mm;
+      height: 297mm;
+      z-index: 1;
+      overflow: hidden;
+    }
+    .background-image {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .page-wrapper {
+      position: relative;
+      z-index: 10;
+      width: 100%;
+      border-collapse: collapse;
+      border: none;
+    }
+    .page-wrapper > thead > tr > td,
+    .page-wrapper > tbody > tr > td,
+    .page-wrapper > tfoot > tr > td { padding: 0; }
+    
+    .body-content { 
+      padding: 0 28px;
+    }
+
+    /* ── Header spacer for repeating background logo ── */
+    .header-spacer { height: 180px; }
+
+    /* ── Report ID badge ── */
+    .report-id-bar {
+      text-align: right;
+      padding: 2px 0 8px 0;
+      font-size: 10px;
+      font-weight: 700;
+      color: #555;
+    }
+    .report-id-bar span {
+      background: #c41e3a;
+      color: #fff;
+      padding: 3px 12px;
+      border-radius: 3px;
+      font-size: 11px;
+      letter-spacing: 0.5px;
+    }
+
+    /* ── Compact section ── */
+    .section { 
+      margin-bottom: 5px;
+      border: 1px solid #d0d0d0;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .section-header, .section-header-red { 
+      font-size: 7px; 
+      font-weight: 700; 
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      padding: 4px 8px;
+      -webkit-print-color-adjust: exact;
+      color: #fff;
+    }
+    .section-header { background: #1b3a5c; }
+    .section-header-red { background: #c41e3a; }
+
+    /* ── Data grid (table-based for reliability) ── */
+    .data-grid {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .data-grid td {
+      padding: 3px 6px;
+      vertical-align: top;
+      border-bottom: 1px solid #e8e8e8;
+      font-size: 8px;
+      line-height: 1.2;
+    }
+    .data-grid td:last-child { border-right: none; }
+    .data-grid .lbl {
+      font-size: 6px;
+      font-weight: 700;
+      color: #0077b6;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      display: block;
+      margin-bottom: 1px;
+    }
+    .data-grid .val {
+      color: #1a1a1a;
+      font-size: 8px;
+      word-break: break-word;
+      overflow-wrap: break-word;
+      white-space: pre-wrap;
+    }
+    .data-grid .val-price {
+      color: #c41e3a;
+      font-weight: 700;
+      font-size: 11px;
+    }
+    .data-grid .full-row td {
+      border-bottom: none;
+    }
+
+    /* ── Comment / text block ── */
+    .text-block {
+      padding: 4px 6px;
+      font-size: 8px;
+      line-height: 1.3;
+      color: #1a1a1a;
+      word-break: break-word;
+      white-space: pre-wrap;
+    }
+    .text-block .lbl {
+      font-size: 7px;
+      font-weight: 700;
+      color: #0077b6;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      display: block;
+      margin-bottom: 2px;
+    }
+
+    /* ── Signatures ── */
+    .signatures { 
+      margin-top: 40px;
+      padding: 0 28px 20px 28px;
+    }
+    .sig-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .sig-table td {
+      text-align: center;
+      vertical-align: bottom;
+      padding-bottom: 4px;
+      height: 50px;
+    }
+    .sig-line {
+      border-top: 1.5px solid #1a1a1a;
+      font-size: 8px;
+      font-weight: 700;
+      color: #333;
+      padding-top: 4px;
+      text-align: center;
+    }
+    .sig-spacer { width: 60px; }
+
+    /* ── Footer ── */
+    .pdf-footer { 
+      text-align: center; 
+      font-size: 7px; 
+      color: #aaa; 
+      padding: 4px 0 8px 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="background-container">
+    <img src="${PDF_TEMPLATE_BASE64}" class="background-image" />
+  </div>
+
+  <table class="page-wrapper">
+    <thead>
+      <tr>
+        <td>
+          <!-- Header space that repeats on EVERY page -->
+          <div class="header-spacer"></div>
+        </td>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>
+          <div class="body-content">
+
+      <!-- ═══ DATOS GENERALES ═══ -->
+      <div class="section">
+        <div class="section-header">Datos Generales</div>
+        <table class="data-grid">
+          <tr>
+            <td style="width:25%"><span class="lbl">Reporte</span><span class="val" style="color:#c41e3a; font-weight:700;">#${reporte.id}</span></td>
+            <td style="width:25%"><span class="lbl">Equipo / Servicio</span><span class="val">${reporte.equipo_descripcion || 'N/A'}</span></td>
+            <td style="width:25%"><span class="lbl">Modelo</span><span class="val">${modeloValue}</span></td>
+            <td style="width:25%"><span class="lbl">Serie</span><span class="val">${serieValue}</span></td>
+          </tr>
+          <tr>
+            <td><span class="lbl">Prioridad</span><span class="val">${(reporte.prioridad || 'media').charAt(0).toUpperCase() + (reporte.prioridad || 'media').slice(1)}</span></td>
+            <td><span class="lbl">Sucursal</span><span class="val">${sucursalValue}</span></td>
+            <td><span class="lbl">Estado</span><span class="val">${obtenerNombreEstado(reporte.estado)}</span></td>
+            <td><span class="lbl">Fecha de Creación</span><span class="val">${reporte.created_at ? new Date(reporte.created_at).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' }) : 'N/A'}</span></td>
+          </tr>
+          <tr>
+            <td colspan="2"><span class="lbl">Empresa</span><span class="val">${reporte.empresa || 'N/A'}</span></td>
+            <td colspan="2"><span class="lbl">Solicitante</span><span class="val">${reporte.usuario_nombre || ''} ${reporte.usuario_apellido || ''}</span></td>
+          </tr>
+          <tr>
+            <td colspan="4"><span class="lbl">Técnico Asignado</span><span class="val">${reporte.empleado_nombre || reporte.empleado_asignado_nombre || 'N/A'}</span></td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- ═══ COMENTARIO / PROBLEMA ═══ -->
+      ${comentarioFinal ? `
+      <div class="section">
+        <div class="section-header">Comentario / Problema</div>
+        <div class="text-block">${comentarioFinal}</div>
+      </div>` : ''}
+
+      <!-- ═══ COTIZACIÓN ═══ -->
+      ${reporte.analisis_general ? `
+      <div class="section">
+        <div class="section-header-red">Información de Cotización</div>
+        ${(parseFloat(reporte.precio_cotizacion) > 0 && (reporte.estado || '').toLowerCase() !== 'en_cotizacion') ? `
+        <table class="data-grid">
+          <tr>
+            <td style="width:30%"><span class="lbl">Costo de Cotización</span><span class="val val-price">${formatDisplayPrice(reporte.precio_cotizacion, reporte.moneda)}</span></td>
+            <td style="width:70%"><span class="lbl">Análisis General</span><span class="val">${reporte.analisis_general}</span></td>
+          </tr>
+        </table>` : `
+        <div class="text-block">
+          <span class="lbl">Análisis General</span>
+          ${reporte.analisis_general}
+        </div>`}
+      </div>` : ''}
+
+      <!-- ═══ TRABAJO REALIZADO ═══ -->
+      ${(reporte.reparacion || reporte.materiales_refacciones || reporte.recomendaciones || reporte.recomendaciones_adicionales) ? `
+      <div class="section">
+        <div class="section-header">Trabajo Realizado</div>
+        ${reporte.reparacion ? `<div class="text-block"><span class="lbl">Reparación Realizada</span>${reporte.reparacion}</div>` : ''}
+        ${reporte.materiales_refacciones ? `<div class="text-block" style="border-top:1px solid #e8e8e8;"><span class="lbl">Materiales / Refacciones</span>${reporte.materiales_refacciones}</div>` : ''}
+        ${reporte.recomendaciones ? `<div class="text-block" style="border-top:1px solid #e8e8e8;"><span class="lbl">Recomendaciones</span>${reporte.recomendaciones}</div>` : ''}
+        ${reporte.recomendaciones_adicionales ? `<div class="text-block" style="border-top:1px solid #e8e8e8;"><span class="lbl">Recomendaciones Adicionales</span>${reporte.recomendaciones_adicionales}</div>` : ''}
+      </div>` : ''}
+
+      <!-- ═══ ARCHIVOS ADJUNTOS ═══ -->
+      ${(normalizeStatus(reporte.estado) === 'cerrado' && pdfArchivos.length > 0) ? `
+      ${shouldBreakBeforeAttachments ? '<div style="page-break-before: always; break-before: page; height:0; visibility:hidden;"></div>' : ''}
+      <div class="section">
+        <div class="section-header">Archivos Adjuntos</div>
+        <div class="text-block" style="font-size: 8px; line-height: 1.6;">
+          ${pdfArchivos
+            .map((a, i) => `${i + 1}. ${a.nombre_original || (a.tipo_archivo === 'foto' ? 'Imagen' : 'Archivo')} (${a.tipo_archivo})`)
+            .join('<br/>')}
+        </div>
+      </div>` : ''}
+    </div>
+
+    <!-- ═══ FIRMAS ═══ -->
+    <div class="signatures">
+      <table class="sig-table">
+        <tr>
+          <td></td>
+          <td class="sig-spacer"></td>
+          <td></td>
+        </tr>
+        <tr>
+          <td><div class="sig-line">Firma del Técnico</div></td>
+          <td class="sig-spacer"></td>
+          <td><div class="sig-line">Firma del Cliente</div></td>
+        </tr>
+      </table>
+    </div>
+
+    <!-- ═══ FOOTER ═══ -->
+    <div class="pdf-footer">si-mant.com</div>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</body>
+</html>`;
+
+      // --- GENERACIÓN ---
+      if (Platform.OS === 'web') {
+        try {
+          console.log('[PDF] Enviando petición al servidor:', `${getApiBaseUrl()}/pdf/generate`);
+          const response = await fetch(`${getApiBaseUrl()}/pdf/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ html: htmlTemplate })
+          });
+          if (!response.ok) throw new Error('Error al generar PDF');
+          const arrayBuffer = await response.arrayBuffer();
+          const blob = new Blob([arrayBuffer], { type: 'application/pdf' });
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = `Reporte_${reporte.id}_${new Date().getTime()}.pdf`;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          setTimeout(() => URL.revokeObjectURL(url), 100);
+          Alert.alert('PDF Descargado', 'El archivo se ha guardado en tu carpeta de descargas.', [{ text: 'OK' }]);
+        } catch (error) {
+          console.error('[PDF] Error:', error);
+          Alert.alert('Error', 'No se pudo generar el PDF');
+        }
+      } else {
+        const { uri } = await Print.printToFileAsync({ html: htmlTemplate });
+        const fileName = `Reporte_${reporte.id}_${new Date().getTime()}.pdf`;
+        const storageDir = Platform.OS === 'android' ? FileSystem.cacheDirectory : FileSystem.documentDirectory;
+        const downloadPath = `${storageDir}${fileName}`;
+        await FileSystem.moveAsync({ from: uri, to: downloadPath });
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(downloadPath, { mimeType: 'application/pdf', dialogTitle: 'Abrir PDF de Reporte', UTI: 'com.adobe.pdf' });
+        } else {
+          Alert.alert('PDF Descargado', 'El archivo se ha guardado exitosamente.', [{ text: 'OK' }]);
+        }
+      }
+    } catch (error) {
+      console.error('[PDF] Error al generar PDF:', error);
+      Alert.alert('Error', 'No se pudo generar el PDF');
+    } finally {
+      setGenerandoPDF(false);
+    }
+  };
+
+
+
+  const cargarArchivosReporte = useCallback(
+    async (reporteId: string) => {
+      if (!reporteId) {
+        setArchivosReporte([]);
+        return;
+      }
+      setLoadingArchivos(true);
+      try {
+        const { success, data, error } = await obtenerArchivosReporteBackend(reporteId);
+        if (success && data) {
+          const soloMedia = (data || []).filter((a: any) => a.tipo_archivo !== 'pdf');
+          setArchivosReporte(soloMedia);
+          logDebug('[CLIENTE-PANEL] Archivos cargados:', data?.length);
+        } else {
+          console.error('[CLIENTE-PANEL] Error cargando archivos:', error);
+          setArchivosReporte([]);
+        }
+      } catch (error) {
+        console.error('[CLIENTE-PANEL] Exception cargando archivos:', error);
+        setArchivosReporte([]);
+      } finally {
+        setLoadingArchivos(false);
+      }
+    },
+    []
+  );
+
+  // Cargar reportes y cotizaciones al enfocar el panel
+  useFocusEffect(
+    useCallback(() => {
+      if (usuario?.email) {
+        logDebug('[CLIENTE-PANEL] Panel enfocado, cargando datos...');
+        cargarReportes(usuario?.email);
+        cargarCotizaciones(usuario?.email);
+        // PASO 4: Cargar reportes finalizados por técnico
+        cargarReportesFinalizados(usuario?.email);
+
+        // Recargar cada 3 segundos para mantener datos actualizados (aumenté de 5 a 3)
+        const interval = setInterval(() => {
+          logDebug('[CLIENTE-PANEL] Auto-refresh: recargando reportes finalizados');
+          cargarReportesFinalizados(usuario?.email);
+        }, 3000);
+
+        return () => {
+          logDebug('[CLIENTE-PANEL] Panel desenfocado, limpiando interval');
+          clearInterval(interval);
+        };
+      }
+    }, [usuario?.email, cargarReportes, cargarCotizaciones, cargarReportesFinalizados])
+  );
+
+  // Refrescar empresa/apellido si no están en AsyncStorage
+  useEffect(() => {
+    const refrescarPerfil = async () => {
+      if (!usuario?.id) return;
+      if (usuario?.empresa && usuario?.apellido) return; // ya lo tenemos completo
+      // Los datos ya vienen del login, no necesitamos refrescar
+      // El usuario está completo en AsyncStorage después del login
+    };
+    refrescarPerfil();
+  }, [usuario?.id, usuario?.empresa, usuario?.apellido]);
+
+  // Recargar cotizaciones cuando se abre el modal
+  useEffect(() => {
+    if (showCotizacionesModal && usuario?.email) {
+      cargarCotizaciones(usuario.email);
+    }
+  }, [showCotizacionesModal, usuario?.email, cargarCotizaciones]);
+
+  // Animation for refresh
+  const spinValue = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (loadingCotizaciones) {
+      spinValue.setValue(0);
+      Animated.loop(
+        Animated.timing(spinValue, {
+          toValue: 1,
+          duration: 1000,
+          easing: Easing.linear,
+          useNativeDriver: true,
+        })
+      ).start();
+    } else {
+      spinValue.stopAnimation();
+      spinValue.setValue(0);
+    }
+  }, [loadingCotizaciones]);
+
+  const spin = spinValue.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '360deg'],
+  });
+
+  // Filtrar reportes que están pendientes de confirmación
+  // SOLO cuando admin confirmó (finalizado_por_tecnico) o cliente confirmó (listo_para_encuesta)
+  const reportesPorConfirmar = useMemo(
+    () => reportesFinalizados.filter(r =>
+      r.estado === 'finalizado_por_tecnico' ||
+      r.estado === 'listo_para_encuesta' ||
+      r.estado === 'encuesta_satisfaccion' ||
+      r.estado === 'cerrado'
+    ),
+    [reportesFinalizados]
+  );
+
+  const finalizados = useMemo(
+    () => reportes.filter((r) => (r.estado || '').toLowerCase() === 'terminado'),
+    [reportes]
+  );
+  const ahora = useMemo(() => new Date(), []);
+  const reportesDelMes = useMemo(
+    () =>
+      todosLosReportes.filter((r) => {
+        if (!r.created_at) return false;
+        const d = new Date(r.created_at);
+        return d.getMonth() === ahora.getMonth() && d.getFullYear() === ahora.getFullYear();
+      }).length,
+    [todosLosReportes, ahora]
+  );
+  // Contadores individuales por estado
+  // Debug: ver qué estados están llegando
+  useEffect(() => {
+    if (todosLosReportes.length > 0) {
+      const estados = todosLosReportes.map(r => r.estado);
+      logDebug('[CLIENTE-PANEL] Estados de reportes:', estados);
+      logDebug('[CLIENTE-PANEL] Estados únicos:', [...new Set(estados)]);
+    }
+  }, [todosLosReportes]);
+
+  const enEsperaCount = useMemo(
+    () => todosLosReportes.filter((r) => {
+      const st = (r.estado || '').toLowerCase().replace(/\s+/g, '_');
+      return st === 'en_espera' || st === 'pendiente' || st === 'en_espera';
+    }).length,
+    [todosLosReportes]
+  );
+  const asignadoCount = useMemo(
+    () => todosLosReportes.filter((r) => {
+      const st = (r.estado || '').toLowerCase().replace(/\s+/g, '_');
+      return st === 'asignado';
+    }).length,
+    [todosLosReportes]
+  );
+  const enCotizacionCount = useMemo(
+    () => todosLosReportes.filter((r) => {
+      const st = (r.estado || '').toLowerCase().replace(/\s+/g, '_');
+      return st === 'en_cotizacion' || st === 'cotizado' || st === 'en_espera_confirmacion' || st === 'revision_pendiente_cotizacion' || st === 'revision_pendiente_cotizacion(nueva)';
+    }).length,
+    [todosLosReportes]
+  );
+  const enEjecucionCount = useMemo(
+    () => todosLosReportes.filter((r) => {
+      const st = (r.estado || '').toLowerCase().replace(/\s+/g, '_');
+      return st === 'en_proceso' || st === 'en_ejecucion' || st === 'aceptado_por_cliente';
+    }).length,
+    [todosLosReportes]
+  );
+  const cerradoCount = useMemo(
+    () => todosLosReportes.filter((r) => {
+      const st = (r.estado || '').toLowerCase().replace(/\s+/g, '_');
+      return st === 'cerrado' || st === 'cerrado_por_cliente' || st === 'terminado' || st === 'finalizado' || st === 'listo_para_encuesta' || st === 'encuesta_satisfaccion';
+    }).length,
+    [todosLosReportes]
+  );
+  const activos = useMemo(() =>
+    reportes.filter((r) => {
+      const st = (r.estado || '').toLowerCase();
+      // Solo quitamos terminado/cerrado definitivamente de la vista principal
+      // En cotización debe aparecer en seguimiento
+      return st !== 'terminado' && st !== 'cerrado' && st !== 'finalizado';
+    }),
+    [reportes]
+  );
+
+  const normalizeStatus = (estado: string) => {
+    const lower = (estado || '').toLowerCase();
+    // Mapa de normalización
+    if (lower.includes('espera') || lower.includes('pendiente')) return 'en_espera';
+    if (lower.includes('asignado')) return 'asignado';
+    if (lower.includes('cotiza') || lower.includes('confirmacion')) return 'en_cotizacion';
+    if (lower.includes('ejecuci') || lower.includes('proceso') || lower.includes('aceptado')) return 'en_ejecucion';
+    if (lower.includes('cerrado') || lower.includes('terminado') || lower.includes('finalizado') || lower.includes('listo') || lower.includes('encuesta')) return 'cerrado';
+    return 'en_espera'; // Default
+  };
+
+  const activosFiltrados = useMemo(() => {
+    let lista = [...activos];
+
+    if (filtroEstado.length > 0) {
+      lista = lista.filter((r) => {
+        const key = normalizeStatus(r.estado);
+        return filtroEstado.includes(key);
+      });
+    }
+
+    if (filtroPrioridad.length > 0) {
+      lista = lista.filter((r) => {
+        const prioridad = (r.prioridad || 'media').toLowerCase();
+        return filtroPrioridad.includes(prioridad);
+      });
+    }
+
+    if (searchQuery.trim() !== '') {
+      const search = searchQuery.toLowerCase();
+      lista = lista.filter((r) => {
+        const equipo = (r.equipo_descripcion || '').toLowerCase();
+        const comentario = (r.comentario || '').toLowerCase();
+        const sucursal = (r.sucursal || '').toLowerCase();
+        return equipo.includes(search) || comentario.includes(search) || sucursal.includes(search);
+      });
+    }
+
+    if (filtroID.trim() !== '') {
+      lista = lista.filter((r) => String(r.id).toLowerCase().includes(filtroID.toLowerCase()));
+    }
+
+    if (filtroFecha.trim() !== '') {
+      const search = filtroFecha.replace(/\//g, '-').toLowerCase();
+      lista = lista.filter((r) => {
+        return matchesSearchDate(r.created_at, search);
+      });
+    }
+
+    return lista;
+  }, [activos, filtroEstado, filtroPrioridad, searchQuery, filtroID, filtroFecha]);
+
+  const reportesFinalizadosFiltrados = useMemo(() => {
+    let lista = [...reportesFinalizados];
+
+    if (filtroEstado.length > 0) {
+      lista = lista.filter((r) => {
+        const key = normalizeStatus(r.estado);
+        return filtroEstado.includes(key);
+      });
+    }
+
+    if (filtroPrioridad.length > 0) {
+      lista = lista.filter((r) => {
+        const prioridad = (r.prioridad || 'media').toLowerCase();
+        return filtroPrioridad.includes(prioridad);
+      });
+    }
+
+    if (searchQuery.trim() !== '') {
+      const search = searchQuery.toLowerCase();
+      lista = lista.filter((r) => {
+        const equipo = (r.equipo_descripcion || '').toLowerCase();
+        const comentario = (r.comentario || '').toLowerCase();
+        const sucursal = (r.sucursal || '').toLowerCase();
+        return equipo.includes(search) || comentario.includes(search) || sucursal.includes(search);
+      });
+    }
+
+    if (filtroID.trim() !== '') {
+      lista = lista.filter((r) => String(r.id).toLowerCase().includes(filtroID.toLowerCase()));
+    }
+
+    if (filtroFecha.trim() !== '') {
+      const search = filtroFecha.replace(/\//g, '-').toLowerCase();
+      lista = lista.filter((r) => {
+        return matchesSearchDate(r.created_at, search);
+      });
+    }
+
+    return lista;
+  }, [reportesFinalizados, filtroEstado, filtroPrioridad, searchQuery, filtroID, filtroFecha]);
+
+  const cotizacionesFiltradas = useMemo(() => {
+    let lista = [...cotizaciones];
+
+    if (searchQuery.trim() !== '') {
+      const search = searchQuery.toLowerCase();
+      lista = lista.filter((c) => {
+        const equipo = (c.equipo_descripcion || '').toLowerCase();
+        return equipo.includes(search);
+      });
+    }
+
+    if (filtroID.trim() !== '') {
+      lista = lista.filter((c) => String(c.id).toLowerCase().includes(filtroID.toLowerCase()));
+    }
+
+    if (filtroFecha.trim() !== '') {
+      const search = filtroFecha.replace(/\//g, '-').toLowerCase();
+      lista = lista.filter((c) => {
+        return matchesSearchDate(c.created_at, search);
+      });
+    }
+
+    return lista;
+  }, [cotizaciones, searchQuery, filtroID, filtroFecha]);
+
+  const activosPorEstado = useMemo(() => {
+    const grupos: Record<string, any[]> = {};
+    activosFiltrados.forEach((r) => {
+      const key = normalizeStatus(r.estado);
+      if (!grupos[key]) grupos[key] = [];
+      grupos[key].push(r);
+    });
+    return grupos;
+  }, [activosFiltrados]);
+
+  const renderReporteCard = (rep: any, isSample = false) => {
+    // Colores dinámicos según el estado usando el mapeo visual
+    const getEstadoStyles = () => {
+      const nombreVisual = obtenerNombreEstado(rep.estado);
+
+      const estilos: Record<string, any> = {
+        'En espera': { bg: '#f59e0b33', text: '#fcd34d', border: '#f59e0b66' },
+        'En asignando': { bg: '#06b6d433', text: '#67e8f9', border: '#06b6d466' },
+        'En cotización': { bg: '#ec489933', text: '#f472b6', border: '#ec489966' },
+        'En ejecución': { bg: '#10b98133', text: '#6ee7b7', border: '#10b98166' },
+        'Cerrado': { bg: '#6366f133', text: '#a5b4fc', border: '#6366f166' },
+      };
+
+      return estilos[nombreVisual] || { bg: '#64748b33', text: '#cbd5e1', border: '#64748b66' };
+    };
+
+    const estadoStyles = getEstadoStyles();
+    const estadoBg = estadoStyles.bg;
+    const estadoText = estadoStyles.text;
+    const estadoBorder = estadoStyles.border;
+
+    const prioridadBg = (rep.prioridad === 'alta' || rep.prioridad === 'urgente') ? '#ef444433' : rep.prioridad === 'media' ? '#f59e0b33' : '#10b98133';
+    const prioridadText = (rep.prioridad === 'alta' || rep.prioridad === 'urgente') ? '#fca5a5' : rep.prioridad === 'media' ? '#fcd34d' : '#6ee7b7';
+    const prioridadBorder = (rep.prioridad === 'alta' || rep.prioridad === 'urgente') ? '#ef444466' : rep.prioridad === 'media' ? '#f59e0b66' : '#10b98166';
+
+    const fecha = rep.created_at ? new Date(rep.created_at).toLocaleString() : isSample ? 'Hace un momento' : '';
+
+    return (
+      <View
+        key={rep.id || `sample - ${rep.equipo_descripcion} `}
+        style={[styles.reportCard, { padding: 12 }]}
+      >
+        <View style={[styles.reportCardHeader, { flexWrap: 'wrap' }]}>
+          <View style={[styles.reportCardInfo, { minWidth: 0, flexShrink: 1 }]}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 1 }}>
+              <Text style={[styles.reportCardTitle, { fontFamily, fontSize: 15, flexShrink: 1 }]} numberOfLines={1} ellipsizeMode="tail">
+                {rep.equipo_descripcion || 'Equipo / servicio'}
+              </Text>
+              {!isSample && rep.id && (
+                <View style={{ backgroundColor: 'rgba(56, 189, 248, 0.1)', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 4, borderWidth: 1, borderColor: 'rgba(56, 189, 248, 0.2)' }}>
+                  <Text style={{ color: '#38bdf8', fontSize: 9, fontWeight: '700', fontFamily }}>Reporte ID: {rep.id}</Text>
+                </View>
+              )}
+            </View>
+            <Text style={[styles.reportCardDate, { fontFamily, fontSize: 11, flexWrap: 'wrap' }]} numberOfLines={2}>
+              {fecha}
+            </Text>
+          </View>
+          <View style={[styles.reportCardActions, { flexWrap: 'wrap', gap: 4 }]}>
+            <View style={[styles.badge, { backgroundColor: estadoBg, borderColor: estadoBorder, minWidth: 0, paddingHorizontal: 8, paddingVertical: 2 }]}>
+              <Text style={[styles.badgeText, { fontFamily, color: estadoText, fontWeight: '600', fontSize: 11 }]} numberOfLines={1}>
+                {isSample ? 'Completado' : obtenerNombreEstado(rep.estado)}
+              </Text>
+            </View>
+            {!isSample && (
+              <TouchableOpacity
+                onPress={() => {
+                  setSelectedReporte(rep);
+                  setShowReporteDetail(true);
+                  cargarArchivosReporte(rep.id);
+                }}
+                style={[styles.eyeButton, { width: 28, height: 28 }]}
+              >
+                <Ionicons name="eye-outline" size={15} color="#06b6d4" />
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
+
+        {rep.comentario?.trim() ? (
+          <Text style={[styles.reportCardComment, { fontFamily, fontSize: 13 }]} numberOfLines={3} ellipsizeMode="tail">
+            {rep.comentario}
+          </Text>
+        ) : null}
+
+        <View style={[styles.reportCardFooter, { flexWrap: 'wrap', gap: 6 }]}>
+          <View style={[styles.badge, { backgroundColor: prioridadBg, borderColor: prioridadBorder, paddingHorizontal: 8, paddingVertical: 2 }]}>
+            <Text style={[styles.badgeText, { fontFamily, color: prioridadText, fontSize: 11 }]} numberOfLines={1}>
+              Prioridad: {rep.prioridad || 'media'}
+            </Text>
+          </View>
+          {rep.sucursal ? (
+            <View style={[styles.badge, { backgroundColor: '#1e293b', borderColor: '#334155', paddingHorizontal: 8, paddingVertical: 2 }]}>
+              <Text style={[styles.badgeText, { fontFamily, color: '#cbd5e1', fontSize: 11 }]} numberOfLines={2}>
+                Sucursal: {rep.sucursal}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+      </View>
+    );
+  };
+
+  const openMediaExternally = (url: string) => {
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      window.location.assign(url);
+      return;
+    }
+    Linking.openURL(url);
+  };
+
+  const ensureDemoFinalizado = useCallback(
+    async (lista: any[]) => {
+      if (!usuario?.email) return;
+      // Función simplificada - no insertar datos de demo
+      // Los reportes se cargan desde la BD
+      // No es necesario crear reportes de demostración
+    },
+    [usuario]
+  );
+
+  const toggleFiltroEstado = (estado: string) => {
+    setFiltroEstado((prev) =>
+      prev.includes(estado) ? prev.filter((e) => e !== estado) : [...prev, estado]
+    );
+  };
+
+  const toggleFiltroPrioridad = (prioridad: string) => {
+    setFiltroPrioridad((prev) =>
+      prev.includes(prioridad) ? prev.filter((p) => p !== prioridad) : [...prev, prioridad]
+    );
+  };
+
+  const limpiarFiltros = () => {
+    setFiltroEstado([]);
+    setFiltroPrioridad([]);
+    setFiltroID('');
+    setFiltroFecha('');
+    setSearchQuery('');
+  };
+
+  const initials = useMemo(() => {
+    const nombre = usuario?.nombre?.trim();
+    if (!nombre) return 'CL';
+    return nombre
+      .split(' ')
+      .map((n) => n.charAt(0).toUpperCase())
+      .join('')
+      .slice(0, 2);
+  }, [usuario?.nombre]);
+
+  const stats = [
+    {
+      label: 'Reportes Generados',
+      value: reportesDelMes,
+      iconBg: 'bg-cyan-500',
+      iconName: 'document-text-outline',
+      cardBg: 'bg-slate-800/40',
+      accent: 'text-cyan-400',
+    },
+    {
+      label: 'En Espera',
+      value: enEsperaCount,
+      iconBg: 'bg-yellow-500',
+      iconName: 'time-outline',
+      cardBg: 'bg-slate-800/40',
+      accent: 'text-yellow-400',
+    },
+    {
+      label: 'Asignado',
+      value: asignadoCount,
+      iconBg: 'bg-cyan-500',
+      iconName: 'person-outline',
+      cardBg: 'bg-slate-800/40',
+      accent: 'text-cyan-400',
+    },
+    {
+      label: 'En Cotización',
+      value: enCotizacionCount,
+      iconBg: 'bg-amber-500',
+      iconName: 'calculator-outline',
+      cardBg: 'bg-slate-800/40',
+      accent: 'text-amber-400',
+    },
+    {
+      label: 'En Ejecución',
+      value: enEjecucionCount,
+      iconBg: 'bg-blue-500',
+      iconName: 'construct-outline',
+      cardBg: 'bg-slate-800/40',
+      accent: 'text-blue-400',
+    },
+    {
+      label: 'Cerrado',
+      value: cerradoCount,
+      iconBg: 'bg-emerald-500',
+      iconName: 'checkmark-circle-outline',
+      cardBg: 'bg-slate-800/40',
+      accent: 'text-emerald-400',
+    },
+  ];
+
+  const abrirWhatsAppSoporte = async () => {
+    try {
+      const phone = '5216634387533';
+      const urlApp = `whatsapp://send?phone=${phone}`;
+      const urlWeb = `https://wa.me/${phone}`;
+      const supported = await Linking.canOpenURL(urlApp);
+      const target = supported ? urlApp : urlWeb;
+      logDebug('[WhatsApp] Intentando abrir:', target);
+      await Linking.openURL(target);
+    } catch (e) {
+      console.error('[WhatsApp] Error:', e);
+      Alert.alert('Soporte', 'No se pudo abrir WhatsApp.');
+    }
+  };
+
+  const mainOptions = [
+    {
+      title: 'Generar reporte',
+      description: 'Crea un nuevo reporte de servicio',
+      gradient: 'from-cyan-600 to-blue-500',
+      iconName: 'create-outline',
+      onPress: () => router.push('/modal'),
+    },
+    {
+      title: 'Ver mis reportes',
+      description: 'Historial de todos tus reportes',
+      gradient: 'from-indigo-600 to-purple-500',
+      iconName: 'folder-open-outline',
+      onPress: async () => {
+        setShowReportModal(true);
+        const lista = (await cargarReportesFinalizados(usuario?.email)) || [];
+        await ensureDemoFinalizado(lista);
+      },
+    },
+    {
+      title: 'Cotizaciones',
+      description: 'Ver cotizaciones de tus reportes',
+      gradient: 'from-emerald-600 to-teal-500',
+      iconName: 'pricetag-outline',
+      onPress: async () => {
+        await cargarCotizaciones(usuario?.email);
+        setShowCotizacionesModal(true);
+      },
+    },
+    {
+      title: 'Seguimiento',
+      description: 'Revisa el estado de tus casos',
+      gradient: 'from-cyan-700 to-cyan-600',
+      iconName: 'pulse-outline',
+      onPress: async () => {
+        setShowSeguimientoModal(true);
+        await cargarReportes(usuario?.email);
+      },
+    },
+    {
+      title: 'Contactar soporte directo',
+      description: 'Chat o correo con el equipo',
+      gradient: 'from-slate-700 to-slate-600',
+      iconName: 'headset-outline',
+      onPress: abrirWhatsAppSoporte,
+    },
+  ];
+
+  const confirmLogout = async () => {
+    await AsyncStorage.removeItem('user');
+    router.replace('/');
+  };
+
+  const handleLogout = () => {
+    setShowLogout(true);
+  };
+
+  const handleUpdatePassword = async () => {
+    // Reset validations
+    setPasswordErrors({ currentPassword: '', newPassword: '', confirmPassword: '', general: '' });
+    let isValid = true;
+    const newErrors = { currentPassword: '', newPassword: '', confirmPassword: '', general: '' };
+
+    if (!passwordForm.currentPassword) {
+      newErrors.currentPassword = 'La contraseña actual es requerida.';
+      isValid = false;
+    }
+
+    if (!passwordForm.newPassword) {
+      newErrors.newPassword = 'La nueva contraseña es requerida.';
+      isValid = false;
+    } else if (passwordForm.newPassword.length < 6) {
+      newErrors.newPassword = 'Mínimo 6 caracteres.';
+      isValid = false;
+    } else if (passwordForm.newPassword === passwordForm.currentPassword) {
+      newErrors.newPassword = 'Debe ser diferente a la actual.';
+      isValid = false;
+    }
+
+    if (!passwordForm.confirmPassword) {
+      newErrors.confirmPassword = 'Confirma tu nueva contraseña.';
+      isValid = false;
+    } else if (passwordForm.newPassword !== passwordForm.confirmPassword) {
+      newErrors.confirmPassword = 'Las contraseñas no coinciden.';
+      isValid = false;
+    }
+
+    if (!isValid) {
+      setPasswordErrors(newErrors);
+      return;
+    }
+
+    setLoadingPassword(true);
+    try {
+      // Usar apiCall del backend-lib que ya maneja la URL y el token
+      const response = await apiCall('/auth/change-password', 'PUT', {
+        currentPassword: passwordForm.currentPassword,
+        newPassword: passwordForm.newPassword
+      });
+
+      if (response.success) {
+        Alert.alert('¡Excelente!', 'Tu contraseña ha sido actualizada correctamente.');
+        setShowPasswordModal(false);
+        setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+      } else {
+        // Manejo específico de errores del backend
+        if (response.error === 'La contraseña actual es incorrecta') {
+          setPasswordErrors(prev => ({ ...prev, currentPassword: 'La contraseña actual no es correcta.' }));
+        } else {
+          setPasswordErrors(prev => ({ ...prev, general: response.error || 'No se pudo actualizar.' }));
+        }
+      }
+    } catch (error: any) {
+      console.error('Error changing password:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Error desconocido';
+      setPasswordErrors(prev => ({ ...prev, general: `Error de conexión: ${errorMessage}` }));
+    } finally {
+      setLoadingPassword(false);
+    }
+  };
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <ScrollView
+        contentContainerStyle={{ paddingBottom: 32 }}
+        showsVerticalScrollIndicator={false}
+        style={styles.scrollView}
+      >
+        <View style={isMobile ? styles.contentMobile : styles.content}>
+          <View style={isMobile ? styles.headerMobile : styles.header}>
+            <View style={styles.headerLeft}>
+              <View style={styles.avatarContainer}>
+                <View style={styles.avatar}>
+                  <Text style={styles.avatarText}>{initials}</Text>
+                </View>
+                <View style={styles.statusDot} />
+              </View>
+
+              <View style={styles.headerInfo}>
+                <Text style={[styles.welcomeText, { fontFamily }]}>
+                  Bienvenido {usuario?.nombre ?? 'Usuario'}{usuario?.apellido ? ` ${usuario.apellido}` : ''}
+                </Text>
+                <Text style={[styles.empresaText, { fontFamily }]}>
+                  Empresa {usuario?.empresa ? usuario.empresa : 'Empresa no definida'}
+                </Text>
+                <Text style={[styles.roleText, { fontFamily }]}>Panel de Cliente</Text>
+              </View>
+            </View>
+
+            <View style={styles.headerActions}>
+              <TouchableOpacity
+                onPress={() => setShowPasswordModal(true)}
+                style={styles.toggleButton}
+              >
+                <Ionicons name="key-outline" size={18} color="#94a3b8" />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => setShowStats(!showStats)}
+                style={styles.toggleButton}
+              >
+                <Ionicons name={showStats ? "eye-off-outline" : "eye-outline"} size={18} color="#94a3b8" />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={handleLogout}
+                style={styles.logoutButton}
+              >
+                <Ionicons name="log-out-outline" size={18} color="#94a3b8" />
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {showStats && (
+            <View style={isMobile ? styles.statsRowMobile : styles.statsRow}>
+              {stats.map((stat, index) => (
+                <TouchableOpacity
+                  key={index}
+                  activeOpacity={0.9}
+                  style={isMobile ? styles.statCardMobile : styles.statCard}
+                >
+                  <View style={styles.statCardHeader}>
+                    <View style={[styles.statIcon, {
+                      backgroundColor: stat.iconBg.includes('cyan') ? '#06b6d4'
+                        : stat.iconBg.includes('amber') ? '#f59e0b'
+                          : stat.iconBg.includes('blue') ? '#3b82f6'
+                            : stat.iconBg.includes('yellow') ? '#eab308'
+                              : stat.iconBg.includes('emerald') ? '#10b981'
+                                : '#06b6d4'
+                    }]}>
+                      <Ionicons name={stat.iconName as any} size={24} color="white" />
+                    </View>
+                    <View style={styles.statBadge}>
+                      <Text style={[styles.statBadgeText, { fontFamily }]}>Hoy</Text>
+                    </View>
+                  </View>
+
+                  <Text style={[styles.statValue, { fontFamily }]}>{stat.value}</Text>
+                  <Text style={[styles.statLabel, { fontFamily }]}>{stat.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
+
+          <View style={styles.sectionHeader}>
+            <Text style={[styles.sectionTitle, { fontFamily }]}>Acciones principales</Text>
+            <Text style={[styles.sectionSubtitle, { fontFamily }]}>Genera y consulta tus reportes</Text>
+          </View>
+
+          <View style={isMobile ? styles.optionsGridMobile : styles.optionsGrid}>
+            {mainOptions.map((option, index) => (
+              <TouchableOpacity
+                key={index}
+                activeOpacity={0.9}
+                onPress={option.onPress}
+                style={[
+                  isMobile ? styles.optionCardMobile : styles.optionCard,
+                  { backgroundColor: option.gradient.includes('cyan') ? '#0891b2' : option.gradient.includes('indigo') ? '#6366f1' : option.gradient.includes('emerald') ? '#059669' : '#475569' }
+                ]}
+              >
+                <View style={isMobile ? styles.optionContentMobile : styles.optionContent}>
+                  <View style={styles.optionIcon}>
+                    <Ionicons name={option.iconName as any} size={28} color="white" />
+                  </View>
+
+                  <View style={styles.optionTextContainer}>
+                    <Text style={[styles.optionTitle, { fontFamily }]}>{option.title}</Text>
+                    <Text style={[styles.optionDescription, { fontFamily }]}>{option.description}</Text>
+                  </View>
+                </View>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+
+        </View>
+      </ScrollView>
+
+      {showReportModal && (
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContainer, { flex: 1, flexDirection: 'column', paddingTop: isMobile ? 60 : 20 }]}>
+            <View style={styles.modalHeader}>
+              <View style={styles.modalHeaderText}>
+                <Text style={[styles.modalTitle, { fontFamily }]}>Mis reportes</Text>
+                <Text style={[styles.modalSubtitle, { fontFamily }]}>
+                  Reportes finalizados
+                </Text>
+              </View>
+              <View style={styles.modalHeaderButtons}>
+                <TouchableOpacity
+                  onPress={() => cargarReportes(usuario?.email)}
+                  disabled={loadingReportes}
+                  style={[styles.refreshButton, loadingReportes && styles.refreshButtonDisabled]}
+                >
+                  {loadingReportes ? (
+                    <ActivityIndicator size="small" color="#67e8f9" />
+                  ) : (
+                    <Text style={[styles.refreshButtonText, { fontFamily }]}>Actualizar</Text>
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => setShowReportModal(false)}
+                  style={styles.closeButton}
+                >
+                  <Ionicons name="close" size={20} color="#cbd5e1" />
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            <View style={styles.infoBox}>
+              <Text style={[styles.infoText, { fontFamily }]}>
+                Aquí ves todos tus reportes completados. Los reportes en progreso están en Seguimiento.
+              </Text>
+            </View>
+
+            {/* ─── Panel de filtros avanzado: Mis Reportes ─── */}
+            <View style={styles.filtroPanel}>
+              <View style={styles.filtroPanelHeader}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Ionicons name="options-outline" size={16} color="#06b6d4" />
+                  <Text style={[styles.filtroTitulo, { fontFamily }]}>Filtros</Text>
+                  {(filtroEstado.length > 0 || filtroPrioridad.length > 0 || filtroID.trim() || filtroFecha.trim() || searchQuery.trim()) && (
+                    <View style={{ backgroundColor: '#06b6d4', borderRadius: 10, paddingHorizontal: 7, paddingVertical: 1 }}>
+                      <Text style={{ color: '#fff', fontSize: 11, fontWeight: '700' }}>
+                        {filtroEstado.length + filtroPrioridad.length + (filtroID.trim() ? 1 : 0) + (filtroFecha.trim() ? 1 : 0) + (searchQuery.trim() ? 1 : 0)}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  {(filtroEstado.length > 0 || filtroPrioridad.length > 0 || filtroID.trim() || filtroFecha.trim() || searchQuery.trim()) && (
+                    <TouchableOpacity onPress={limpiarFiltros} style={styles.limpiarFiltrosButtonSmall}>
+                      <Ionicons name="close-circle" size={16} color="#f87171" />
+                      <Text style={[styles.limpiarFiltrosTextSmall, { fontFamily }]}>Limpiar</Text>
+                    </TouchableOpacity>
+                  )}
+                  <TouchableOpacity onPress={() => setShowFiltros(prev => !prev)}>
+                    <Ionicons name={showFiltros ? 'chevron-up' : 'chevron-down'} size={20} color="#94a3b8" />
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              {showFiltros && (
+                <>
+                  <View style={styles.filtroSection}>
+                    <Text style={[styles.filtroLabel, { fontFamily }]}>Estado</Text>
+                    <View style={styles.filtroChips}>
+                      {[
+                        { value: 'cerrado', label: 'Cerrado', icon: 'checkmark-circle-outline', color: '#6366f1' },
+                        { value: 'en_espera', label: 'Pendiente', icon: 'time-outline', color: '#eab308' },
+                      ].map((estado) => {
+                        const isActive = filtroEstado.includes(estado.value);
+                        return (
+                          <TouchableOpacity
+                            key={estado.value}
+                            onPress={() => toggleFiltroEstado(estado.value)}
+                            style={[styles.filtroChip, isActive && { ...styles.filtroChipActive, borderColor: estado.color }]}
+                          >
+                            <Ionicons name={estado.icon as any} size={14} color={isActive ? estado.color : '#94a3b8'} />
+                            <Text style={[styles.filtroChipText, { fontFamily }, isActive && { ...styles.filtroChipTextActive, color: estado.color }]}>{estado.label}</Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </View>
+
+                  <View style={styles.filtroSection}>
+                    <Text style={[styles.filtroLabel, { fontFamily }]}>Prioridad</Text>
+                    <View style={styles.filtroChips}>
+                      {[
+                        { value: 'baja', label: 'Baja', icon: 'chevron-down-outline', color: '#10b981' },
+                        { value: 'media', label: 'Media', icon: 'remove-outline', color: '#f59e0b' },
+                        { value: 'alta', label: 'Urgente', icon: 'chevron-up-outline', color: '#ef4444' },
+                      ].map((p) => {
+                        const isActive = filtroPrioridad.includes(p.value);
+                        return (
+                          <TouchableOpacity
+                            key={p.value}
+                            onPress={() => toggleFiltroPrioridad(p.value)}
+                            style={[styles.filtroChip, isActive && { ...styles.filtroChipActive, borderColor: p.color }]}
+                          >
+                            <Ionicons name={p.icon as any} size={14} color={isActive ? p.color : '#94a3b8'} />
+                            <Text style={[styles.filtroChipText, { fontFamily }, isActive && { ...styles.filtroChipTextActive, color: p.color }]}>{p.label}</Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </View>
+
+                  {/* Fila 1: Equipo + ID */}
+                  <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? 12 : 20, marginBottom: 20 }}>
+                    <View style={[styles.searchFilterContainerPro, isMobile ? styles.searchFilterContainerMobile : { flex: 1 }]}>
+                      {!isMobile && (
+                        <View style={[styles.searchFilterLabelPro, { marginBottom: 8 }]}>
+                          <Text style={[styles.searchFilterLabelText, { fontFamily }]}>Buscar por Equipo / Servicio</Text>
+                        </View>
+                      )}
+                      <View style={[
+                        styles.searchFilterInputWrapperPro,
+                        searchQuery.length > 0 && styles.searchFilterInputWrapperFocused,
+                        isMobile && { height: 44, backgroundColor: 'rgba(15, 23, 42, 0.4)' }
+                      ]}>
+                        <View style={{ width: 24, alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                          <Ionicons name="search-outline" size={isMobile ? 14 : 18} color={searchQuery.length > 0 ? '#06b6d4' : '#64748b'} />
+                        </View>
+                        <TextInput
+                          style={[styles.searchInputPro, { fontFamily, paddingVertical: isMobile ? 8 : 12 }, isMobile && { fontSize: 13 }]}
+                          placeholder={isMobile ? "Equipo o comentario" : "Nombre o comentario..."}
+                          placeholderTextColor="#64748b"
+                          value={searchQuery}
+                          onChangeText={setSearchQuery}
+                        />
+                        {searchQuery.length > 0 && (
+                          <TouchableOpacity onPress={() => setSearchQuery('')} style={{ padding: 4 }}>
+                            <Ionicons name="close-circle" size={isMobile ? 16 : 20} color="#64748b" />
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    </View>
+                    <View style={[styles.searchFilterContainerPro, isMobile ? styles.searchFilterContainerMobile : { flex: 1 }]}>
+                      {!isMobile && (
+                        <View style={[styles.searchFilterLabelPro, { marginBottom: 8 }]}>
+                          <Text style={[styles.searchFilterLabelText, { fontFamily }]}>ID</Text>
+                        </View>
+                      )}
+                      <View style={[
+                        styles.searchFilterInputWrapperPro,
+                        filtroID.length > 0 && styles.searchFilterInputWrapperFocused,
+                        isMobile && { height: 44, backgroundColor: 'rgba(15, 23, 42, 0.4)' }
+                      ]}>
+                        <View style={{ width: 24, alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                          <Ionicons name="finger-print-outline" size={isMobile ? 14 : 18} color={filtroID.length > 0 ? '#06b6d4' : '#64748b'} />
+                        </View>
+                        <TextInput
+                          style={[styles.searchInputPro, { fontFamily, paddingVertical: isMobile ? 8 : 12 }, isMobile && { fontSize: 13 }]}
+                          placeholder="ID..."
+                          placeholderTextColor="#64748b"
+                          value={filtroID}
+                          onChangeText={setFiltroID}
+                        />
+                        {filtroID.length > 0 && (
+                          <TouchableOpacity onPress={() => setFiltroID('')} style={{ padding: 4 }}>
+                            <Ionicons name="close-circle" size={isMobile ? 16 : 20} color="#64748b" />
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    </View>
+                  </View>
+
+                  {/* Fila 2: Fecha */}
+                  <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? 12 : 20 }}>
+                    <View style={[styles.searchFilterContainerPro, isMobile ? styles.searchFilterContainerMobile : { flex: 1 }]}>
+                      {!isMobile && (
+                        <View style={[styles.searchFilterLabelPro, { marginBottom: 8 }]}>
+                          <Text style={[styles.searchFilterLabelText, { fontFamily }]}>Fecha</Text>
+                        </View>
+                      )}
+                      <View style={[
+                        styles.searchFilterInputWrapperPro,
+                        filtroFecha.length > 0 && styles.searchFilterInputWrapperFocused,
+                        isMobile && { height: 44, backgroundColor: 'rgba(15, 23, 42, 0.4)' }
+                      ]}>
+                        <CustomDatePicker
+                          value={filtroFecha}
+                          onChange={setFiltroFecha}
+                          isMobile={isMobile}
+                          fontFamily={fontFamily}
+                        />
+                      </View>
+                    </View>
+                  </View>
+
+                  {!loadingReportes && (
+                    <View style={styles.filtrosResultados}>
+                      <Ionicons name="document-text-outline" size={14} color="#94a3b8" />
+                      <Text style={[styles.filtrosResultadosText, { fontFamily }]}>
+                        Mostrando {reportesFinalizadosFiltrados.length} de {reportesFinalizados.length} reportes
+                      </Text>
+                    </View>
+                  )}
+                </>
+              )}
+            </View>
+
+            {loadingReportes && (
+              <View style={styles.reportCard}>
+                <Text style={[styles.loadingText, { fontFamily }]}>Cargando reportes...</Text>
+              </View>
+            )}
+
+            {!loadingReportes && errorReportes ? (
+              <View style={styles.errorBox}>
+                <Text style={[styles.errorText, { fontFamily }]}>{errorReportes}</Text>
+              </View>
+            ) : null}
+
+            {!loadingReportes && !errorReportes && reportesFinalizadosFiltrados.length === 0 ? (
+              <View style={styles.emptyContainer}>
+                <View style={styles.reportCard}>
+                  <Text style={[styles.emptyText, { fontFamily }]}>
+                    {searchQuery ? 'No se encontraron reportes.' : 'Aún no tienes reportes completados.'}
+                  </Text>
+                </View>
+              </View>
+            ) : null}
+
+
+            {!loadingReportes && !errorReportes && reportesFinalizadosFiltrados.length > 0 ? (
+              <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
+                <View style={styles.reportsContainer}>
+                  {reportesFinalizadosFiltrados.map((rep) => renderReporteCard(rep))}
+                </View>
+              </ScrollView>
+            ) : null}
+          </View>
+        </View>
+      )}
+
+      {showSeguimientoModal && (
+        <View style={styles.modalOverlay}>
+          <View style={[
+            styles.modalContainer,
+            { flex: 1, flexDirection: 'column', paddingTop: isMobile ? 60 : 20, maxHeight: isMobile ? '90%' : 700, width: isMobile ? '100%' : 700 }
+          ]}>
+            <View style={[styles.modalHeader, isMobile && styles.modalHeaderMobile]}>
+              <View style={styles.modalHeaderText}>
+                <Text style={[styles.modalTitle, isMobile && styles.modalTitleMobile, { fontFamily }]}>Seguimiento</Text>
+                <Text style={[styles.modalSubtitle, isMobile && styles.modalSubtitleMobile, { fontFamily }]}>Reportes activos.</Text>
+              </View>
+              <View style={[styles.modalHeaderButtons, isMobile && styles.modalHeaderButtonsMobile]}>
+                <TouchableOpacity
+                  onPress={() => setShowFiltros((prev) => !prev)}
+                  style={styles.filterToggleButton}
+                >
+                  <Ionicons name="options-outline" size={16} color="#06b6d4" />
+                  <Text style={[styles.refreshButtonText, { fontFamily, color: '#06b6d4' }]}>
+                    {showFiltros ? 'Ocultar filtros' : 'Mostrar filtros'}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => cargarReportes(usuario?.email)}
+                  style={styles.refreshButton}
+                >
+                  <Text style={[styles.refreshButtonText, { fontFamily }]}>Actualizar</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => setShowSeguimientoModal(false)}
+                  style={styles.closeButton}
+                >
+                  <Ionicons name="close" size={20} color="#cbd5e1" />
+                </TouchableOpacity>
+              </View>
+            </View>
+
+
+            {/* ─── Panel de filtros avanzado: Seguimiento ─── */}
+            <View style={styles.filtroPanel}>
+              <View style={styles.filtroPanelHeader}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Ionicons name="options-outline" size={16} color="#06b6d4" />
+                  <Text style={[styles.filtroTitulo, { fontFamily }]}>Filtros</Text>
+                  {(filtroEstado.length > 0 || filtroPrioridad.length > 0 || filtroID.trim() || filtroFecha.trim() || searchQuery.trim()) && (
+                    <View style={{ backgroundColor: '#06b6d4', borderRadius: 10, paddingHorizontal: 7, paddingVertical: 1 }}>
+                      <Text style={{ color: '#fff', fontSize: 11, fontWeight: '700' }}>
+                        {filtroEstado.length + filtroPrioridad.length + (filtroID.trim() ? 1 : 0) + (filtroFecha.trim() ? 1 : 0) + (searchQuery.trim() ? 1 : 0)}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  {(filtroEstado.length > 0 || filtroPrioridad.length > 0 || filtroID.trim() || filtroFecha.trim() || searchQuery.trim()) && (
+                    <TouchableOpacity onPress={limpiarFiltros} style={styles.limpiarFiltrosButtonSmall}>
+                      <Ionicons name="close-circle" size={16} color="#f87171" />
+                      <Text style={[styles.limpiarFiltrosTextSmall, { fontFamily }]}>Limpiar</Text>
+                    </TouchableOpacity>
+                  )}
+                  <TouchableOpacity onPress={() => setShowFiltros(prev => !prev)}>
+                    <Ionicons name={showFiltros ? 'chevron-up' : 'chevron-down'} size={20} color="#94a3b8" />
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              {showFiltros && (
+                <>
+                  <View style={styles.filtroSection}>
+                    <Text style={[styles.filtroLabel, { fontFamily }]}>Estado</Text>
+                    <View style={styles.filtroChips}>
+                      {[
+                        { value: 'en_espera', label: 'En Espera', icon: 'time-outline', color: '#eab308' },
+                        { value: 'asignado', label: 'Asignado', icon: 'person-add-outline', color: '#06b6d4' },
+                        { value: 'en_cotizacion', label: 'En Cotización', icon: 'calculator-outline', color: '#f59e0b' },
+                        { value: 'en_ejecucion', label: 'En Ejecución', icon: 'construct-outline', color: '#3b82f6' },
+                        { value: 'cerrado', label: 'Por Revisar', icon: 'checkmark-circle-outline', color: '#10b981' },
+                      ].map((estado) => {
+                        const isActive = filtroEstado.includes(estado.value);
+                        return (
+                          <TouchableOpacity
+                            key={estado.value}
+                            onPress={() => toggleFiltroEstado(estado.value)}
+                            style={[styles.filtroChip, isActive && { ...styles.filtroChipActive, borderColor: estado.color }]}
+                          >
+                            <Ionicons name={estado.icon as any} size={14} color={isActive ? estado.color : '#94a3b8'} />
+                            <Text style={[styles.filtroChipText, { fontFamily }, isActive && { ...styles.filtroChipTextActive, color: estado.color }]}>{estado.label}</Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </View>
+
+                  <View style={styles.filtroSection}>
+                    <Text style={[styles.filtroLabel, { fontFamily }]}>Prioridad</Text>
+                    <View style={styles.filtroChips}>
+                      {[
+                        { value: 'baja', label: 'Baja', icon: 'chevron-down-outline', color: '#10b981' },
+                        { value: 'media', label: 'Media', icon: 'remove-outline', color: '#f59e0b' },
+                        { value: 'alta', label: 'Urgente', icon: 'chevron-up-outline', color: '#ef4444' },
+                      ].map((p) => {
+                        const isActive = filtroPrioridad.includes(p.value);
+                        return (
+                          <TouchableOpacity
+                            key={p.value}
+                            onPress={() => toggleFiltroPrioridad(p.value)}
+                            style={[styles.filtroChip, isActive && { ...styles.filtroChipActive, borderColor: p.color }]}
+                          >
+                            <Ionicons name={p.icon as any} size={14} color={isActive ? p.color : '#94a3b8'} />
+                            <Text style={[styles.filtroChipText, { fontFamily }, isActive && { ...styles.filtroChipTextActive, color: p.color }]}>{p.label}</Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </View>
+
+                  {/* Fila 1: Equipo + ID */}
+                  <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? 12 : 20, marginBottom: 20 }}>
+                    <View style={[styles.searchFilterContainerPro, isMobile ? styles.searchFilterContainerMobile : { flex: 1 }]}>
+                      {!isMobile && (
+                        <View style={[styles.searchFilterLabelPro, { marginBottom: 8 }]}>
+                          <Text style={[styles.searchFilterLabelText, { fontFamily }]}>Buscar por Equipo / Servicio</Text>
+                        </View>
+                      )}
+                      <View style={[
+                        styles.searchFilterInputWrapperPro,
+                        searchQuery.length > 0 && styles.searchFilterInputWrapperFocused,
+                        isMobile && { height: 44, backgroundColor: 'rgba(15, 23, 42, 0.4)' }
+                      ]}>
+                        <View style={{ width: 24, alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                          <Ionicons name="search-outline" size={isMobile ? 14 : 18} color={searchQuery.length > 0 ? '#06b6d4' : '#64748b'} />
+                        </View>
+                        <TextInput
+                          style={[styles.searchInputPro, { fontFamily, paddingVertical: isMobile ? 8 : 12 }, isMobile && { fontSize: 13 }]}
+                          placeholder={isMobile ? "Equipo o comentario" : "Nombre o comentario..."}
+                          placeholderTextColor="#64748b"
+                          value={searchQuery}
+                          onChangeText={setSearchQuery}
+                        />
+                        {searchQuery.length > 0 && (
+                          <TouchableOpacity onPress={() => setSearchQuery('')} style={{ padding: 4 }}>
+                            <Ionicons name="close-circle" size={isMobile ? 16 : 20} color="#64748b" />
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    </View>
+                    <View style={[styles.searchFilterContainerPro, isMobile ? styles.searchFilterContainerMobile : { flex: 1 }]}>
+                      {!isMobile && (
+                        <View style={[styles.searchFilterLabelPro, { marginBottom: 8 }]}>
+                          <Text style={[styles.searchFilterLabelText, { fontFamily }]}>ID</Text>
+                        </View>
+                      )}
+                      <View style={[
+                        styles.searchFilterInputWrapperPro,
+                        filtroID.length > 0 && styles.searchFilterInputWrapperFocused,
+                        isMobile && { height: 44, backgroundColor: 'rgba(15, 23, 42, 0.4)' }
+                      ]}>
+                        <View style={{ width: 24, alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                          <Ionicons name="finger-print-outline" size={isMobile ? 14 : 18} color={filtroID.length > 0 ? '#06b6d4' : '#64748b'} />
+                        </View>
+                        <TextInput
+                          style={[styles.searchInputPro, { fontFamily, paddingVertical: isMobile ? 8 : 12 }, isMobile && { fontSize: 13 }]}
+                          placeholder="ID..."
+                          placeholderTextColor="#64748b"
+                          value={filtroID}
+                          onChangeText={setFiltroID}
+                        />
+                        {filtroID.length > 0 && (
+                          <TouchableOpacity onPress={() => setFiltroID('')} style={{ padding: 4 }}>
+                            <Ionicons name="close-circle" size={isMobile ? 16 : 20} color="#64748b" />
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    </View>
+                  </View>
+
+                  {/* Fila 2: Fecha */}
+                  <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? 12 : 20 }}>
+                    <View style={[styles.searchFilterContainerPro, isMobile ? styles.searchFilterContainerMobile : { flex: 1 }]}>
+                      {!isMobile && (
+                        <View style={[styles.searchFilterLabelPro, { marginBottom: 8 }]}>
+                          <Text style={[styles.searchFilterLabelText, { fontFamily }]}>Fecha</Text>
+                        </View>
+                      )}
+                      <View style={[
+                        styles.searchFilterInputWrapperPro,
+                        filtroFecha.length > 0 && styles.searchFilterInputWrapperFocused,
+                        isMobile && { height: 44, backgroundColor: 'rgba(15, 23, 42, 0.4)' }
+                      ]}>
+                        <CustomDatePicker
+                          value={filtroFecha}
+                          onChange={setFiltroFecha}
+                          isMobile={isMobile}
+                          fontFamily={fontFamily}
+                        />
+                      </View>
+                    </View>
+                  </View>
+
+                  {!loadingReportes && (
+                    <View style={styles.filtrosResultados}>
+                      <Ionicons name="document-text-outline" size={14} color="#94a3b8" />
+                      <Text style={[styles.filtrosResultadosText, { fontFamily }]}>
+                        Mostrando {activosFiltrados.length} de {activos.length} reportes
+                      </Text>
+                    </View>
+                  )}
+                </>
+              )}
+            </View>
+
+
+            {loadingReportes && (
+              <View style={styles.reportCard}>
+                <Text style={[styles.loadingText, { fontFamily }]}>Cargando reportes...</Text>
+              </View>
+            )}
+
+            {!loadingReportes && errorReportes ? (
+              <View style={styles.errorBox}>
+                <Text style={[styles.errorText, { fontFamily }]}>{errorReportes}</Text>
+              </View>
+            ) : null}
+
+            {!loadingReportes && !errorReportes && activos.length === 0 ? (
+              <View style={styles.emptyContainer}>
+                <View style={styles.reportCard}>
+                  <Text style={[styles.emptyText, { fontFamily }]}>No tienes reportes en seguimiento.</Text>
+                </View>
+              </View>
+            ) : null}
+
+            {!loadingReportes && !errorReportes && activos.length > 0 ? (
+              <>
+                <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={true} contentContainerStyle={{ paddingBottom: 16 }}>
+                  <View style={styles.reportsContainer}>
+                    {Object.keys(activosPorEstado).length === 0 ? (
+                      <View style={styles.reportCard}>
+                        <Text style={[styles.emptyText, { fontFamily }]}>No hay reportes para este filtro.</Text>
+                      </View>
+                    ) : (
+                      <>
+                        {['en_espera', 'asignado', 'en_cotizacion', 'en_ejecucion', 'cerrado']
+                          .filter((e) => activosPorEstado[e])
+                          .map((estado) => (
+                            <View key={estado}>
+                              {activosPorEstado[estado].map((rep) => renderReporteCard(rep))}
+                            </View>
+                          ))}
+                        {Object.keys(activosPorEstado)
+                          .filter((e) => !['en_espera', 'asignado', 'en_cotizacion', 'en_ejecucion', 'cerrado'].includes(e))
+                          .map((estado) => (
+                            <View key={estado}>
+                              {activosPorEstado[estado].map((rep) => renderReporteCard(rep))}
+                            </View>
+                          ))}
+                      </>
+                    )}
+                  </View>
+                </ScrollView>
+              </>
+            ) : null}
+          </View>
+        </View>
+      )}
+
+      {showPasswordModal && (
+        <View style={styles.modalOverlay}>
+          <View style={[
+            styles.modalContainer,
+            {
+              width: isMobile ? '90%' : '400px',
+              maxHeight: 'auto',
+              backgroundColor: '#0f172a',
+              borderWidth: 1,
+              borderColor: '#334155',
+              padding: 0,
+              overflow: 'hidden'
+            }
+          ]}>
+            <LinearGradient
+              colors={['#1e293b', '#0f172a']}
+              style={{ width: '100%', padding: 24 }}
+            >
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 }}>
+                <View>
+                  <Text style={[styles.modalTitle, { fontFamily, fontSize: 20, marginBottom: 4 }]}>Cambiar Contraseña</Text>
+                  <Text style={[styles.modalSubtitle, { fontFamily, color: '#94a3b8' }]}>Actualiza tu clave de acceso</Text>
+                </View>
+                <TouchableOpacity
+                  onPress={() => {
+                    setShowPasswordModal(false);
+                    setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+                    setPasswordErrors({ currentPassword: '', newPassword: '', confirmPassword: '', general: '' });
+                  }}
+                  style={{ padding: 4 }}
+                >
+                  <Ionicons name="close" size={24} color="#64748b" />
+                </TouchableOpacity>
+              </View>
+
+              {passwordErrors.general ? (
+                <View style={{ backgroundColor: 'rgba(239, 68, 68, 0.2)', padding: 10, borderRadius: 8, marginBottom: 10 }}>
+                  <Text style={{ color: '#f87171', fontFamily, fontSize: 13, textAlign: 'center' }}>{passwordErrors.general}</Text>
+                </View>
+              ) : null}
+
+              <View style={{ gap: 20 }}>
+                <View>
+                  <Text style={[styles.label, { fontFamily, color: '#e2e8f0', marginBottom: 8, fontSize: 14, fontWeight: '500' }]}>Contraseña Actual</Text>
+                  <View style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    backgroundColor: '#1e293b',
+                    borderWidth: 1,
+                    borderColor: passwordErrors.currentPassword ? '#ef4444' : '#334155',
+                    borderRadius: 8,
+                    paddingHorizontal: 12
+                  }}>
+                    <Ionicons name="lock-closed-outline" size={18} color={passwordErrors.currentPassword ? '#ef4444' : "#64748b"} style={{ marginRight: 8 }} />
+                    <TextInput
+                      style={{
+                        flex: 1,
+                        fontFamily,
+                        color: 'white',
+                        paddingVertical: 12,
+                        fontSize: 15
+                      }}
+                      secureTextEntry
+                      value={passwordForm.currentPassword}
+                      onChangeText={(text) => {
+                        setPasswordForm(prev => ({ ...prev, currentPassword: text }));
+                        if (passwordErrors.currentPassword) setPasswordErrors(prev => ({ ...prev, currentPassword: '' }));
+                      }}
+                      placeholder="Ingresa tu contraseña actual"
+                      placeholderTextColor="#475569"
+                    />
+                  </View>
+                  {passwordErrors.currentPassword ? (
+                    <Text style={{ color: '#ef4444', fontSize: 12, marginTop: 4, fontFamily, marginLeft: 4 }}>
+                      {passwordErrors.currentPassword}
+                    </Text>
+                  ) : null}
+                </View>
+
+                <View>
+                  <Text style={[styles.label, { fontFamily, color: '#e2e8f0', marginBottom: 8, fontSize: 14, fontWeight: '500' }]}>Nueva Contraseña</Text>
+                  <View style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    backgroundColor: '#1e293b',
+                    borderWidth: 1,
+                    borderColor: passwordErrors.newPassword ? '#ef4444' : '#334155',
+                    borderRadius: 8,
+                    paddingHorizontal: 12
+                  }}>
+                    <Ionicons name="key-outline" size={18} color={passwordErrors.newPassword ? '#ef4444' : "#64748b"} style={{ marginRight: 8 }} />
+                    <TextInput
+                      style={{
+                        flex: 1,
+                        fontFamily,
+                        color: 'white',
+                        paddingVertical: 12,
+                        fontSize: 15
+                      }}
+                      secureTextEntry
+                      value={passwordForm.newPassword}
+                      onChangeText={(text) => {
+                        setPasswordForm(prev => ({ ...prev, newPassword: text }));
+                        if (passwordErrors.newPassword) setPasswordErrors(prev => ({ ...prev, newPassword: '' }));
+                      }}
+                      placeholder="Ingresa la nueva contraseña"
+                      placeholderTextColor="#475569"
+                    />
+                  </View>
+                  {passwordErrors.newPassword ? (
+                    <Text style={{ color: '#ef4444', fontSize: 12, marginTop: 4, fontFamily, marginLeft: 4 }}>
+                      {passwordErrors.newPassword}
+                    </Text>
+                  ) : null}
+                </View>
+
+                <View>
+                  <Text style={[styles.label, { fontFamily, color: '#e2e8f0', marginBottom: 8, fontSize: 14, fontWeight: '500' }]}>Confirmar Nueva Contraseña</Text>
+                  <View style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    backgroundColor: '#1e293b',
+                    borderWidth: 1,
+                    borderColor: passwordErrors.confirmPassword ? '#ef4444' : '#334155',
+                    borderRadius: 8,
+                    paddingHorizontal: 12
+                  }}>
+                    <Ionicons name="shield-checkmark-outline" size={18} color={passwordErrors.confirmPassword ? '#ef4444' : "#64748b"} style={{ marginRight: 8 }} />
+                    <TextInput
+                      style={{
+                        flex: 1,
+                        fontFamily,
+                        color: 'white',
+                        paddingVertical: 12,
+                        fontSize: 15
+                      }}
+                      secureTextEntry
+                      value={passwordForm.confirmPassword}
+                      onChangeText={(text) => {
+                        setPasswordForm(prev => ({ ...prev, confirmPassword: text }));
+                        if (passwordErrors.confirmPassword) setPasswordErrors(prev => ({ ...prev, confirmPassword: '' }));
+                      }}
+                      placeholder="Confirma la nueva contraseña"
+                      placeholderTextColor="#475569"
+                    />
+                  </View>
+                  {passwordErrors.confirmPassword ? (
+                    <Text style={{ color: '#ef4444', fontSize: 12, marginTop: 4, fontFamily, marginLeft: 4 }}>
+                      {passwordErrors.confirmPassword}
+                    </Text>
+                  ) : null}
+                </View>
+
+                <TouchableOpacity
+                  onPress={handleUpdatePassword}
+                  disabled={loadingPassword}
+                  style={{
+                    backgroundColor: '#06b6d4',
+                    borderRadius: 8,
+                    paddingVertical: 14,
+                    alignItems: 'center',
+                    marginTop: 12,
+                    shadowColor: '#06b6d4',
+                    shadowOffset: { width: 0, height: 4 },
+                    shadowOpacity: 0.2,
+                    shadowRadius: 8,
+                    elevation: 4,
+                    opacity: loadingPassword ? 0.7 : 1
+                  }}
+                >
+                  {loadingPassword ? (
+                    <ActivityIndicator color="white" size="small" />
+                  ) : (
+                    <Text style={{ fontFamily, color: 'white', fontWeight: '600', fontSize: 16 }}>Actualizar Contraseña</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </LinearGradient>
+          </View>
+        </View>
+      )}
+
+      {showReporteDetail && selectedReporte && (
+        <View style={styles.detailOverlay}>
+          <View style={styles.detailContainer}>
+            <View style={styles.detailHeader}>
+              <View style={styles.detailHeaderText}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                  <Text style={[styles.detailTitle, { fontFamily }]}>Detalles del reporte</Text>
+                  <View style={{ backgroundColor: 'rgba(56, 189, 248, 0.15)', paddingHorizontal: 10, paddingVertical: 3, borderRadius: 6, borderWidth: 1, borderColor: 'rgba(56, 189, 248, 0.3)' }}>
+                    <Text style={{ color: '#38bdf8', fontSize: 11, fontWeight: '800', fontFamily }}>Reporte ID: {selectedReporte.id}</Text>
+                  </View>
+                </View>
+              </View>
+              <TouchableOpacity
+                onPress={() => {
+                  setShowReporteDetail(false);
+                  setSelectedReporte(null);
+                }}
+                style={styles.closeButton}
+              >
+                <Ionicons name="close" size={20} color="#cbd5e1" />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={styles.detailScroll}>
+              <View style={styles.detailField}>
+                <Text style={[styles.detailLabel, { fontFamily }]}>Equipo / Servicio</Text>
+                <Text style={[styles.detailValue, { fontFamily, fontWeight: '600' }]}>
+                  {selectedReporte.equipo_descripcion || 'No especificado'}
+                </Text>
+              </View>
+
+              {(() => {
+                // Usar descripcion que contiene el formato completo: "Modelo: xxx\nSerie: yyy\nSucursal: zzz\nComentario: aaa"
+                const fullDescripcion = selectedReporte.descripcion || '';
+
+                // Regex para extraer campos (consistente con admin.tsx)
+                const modeloMatch = fullDescripcion.match(/^\s*Modelo\s*[:\-]\s*(.+)$/im);
+                const serieMatch = fullDescripcion.match(/^\s*Serie\s*[:\-]\s*(.+)$/im);
+                const sucursalMatch = fullDescripcion.match(/^\s*Sucursal\s*[:\-]\s*(.+)$/im);
+                const comentarioMatch = fullDescripcion.match(/^\s*Comentario\s*[:\-]\s*([\s\S]+?)(?:\r?\n\s*Prioridad\s*[:\-]|$)/im);
+
+                const modeloValue = modeloMatch ? modeloMatch[1].trim() : (selectedReporte.equipo_modelo || 'N/A');
+                const serieValue = serieMatch ? serieMatch[1].trim() : (selectedReporte.equipo_serie || 'N/A');
+                const sucursalValue = sucursalMatch ? sucursalMatch[1].trim() : (selectedReporte.sucursal || 'N/A');
+                const comentarioFinal = comentarioMatch ? comentarioMatch[1].trim() : (selectedReporte.comentario || '');
+
+                return (
+                  <>
+                    <View style={styles.detailRow}>
+                      <View style={[styles.detailField, { flex: 1 }]}>
+                        <Text style={[styles.detailLabel, { fontFamily }]}>Modelo</Text>
+                        <Text style={[styles.detailValue, { fontFamily }]}>{modeloValue}</Text>
+                      </View>
+                      <View style={[styles.detailField, { flex: 1 }]}>
+                        <Text style={[styles.detailLabel, { fontFamily }]}>Serie</Text>
+                        <Text style={[styles.detailValue, { fontFamily }]}>{serieValue}</Text>
+                      </View>
+                    </View>
+
+                    <View style={styles.detailField}>
+                      <Text style={[styles.detailLabel, { fontFamily }]}>Sucursal</Text>
+                      <Text style={[styles.detailValue, { fontFamily }]}>{sucursalValue}</Text>
+                    </View>
+
+                    {comentarioFinal.trim() ? (
+                      <View style={styles.detailField}>
+                        <Text style={[styles.detailLabel, { fontFamily }]}>Comentario / Problema</Text>
+                        <Text style={[styles.detailValue, { fontFamily }]}>{comentarioFinal}</Text>
+                      </View>
+                    ) : null}
+                  </>
+                );
+              })()}
+
+              <View style={styles.detailRow}>
+                <View style={[styles.detailField, { flex: 1 }]}>
+                  <Text style={[styles.detailLabel, { fontFamily }]}>Prioridad</Text>
+                  <Text style={[styles.detailValue, { fontFamily, textTransform: 'capitalize' }]}>{selectedReporte.prioridad || 'media'}</Text>
+                </View>
+
+                <View style={[styles.detailField, { flex: 1 }]}>
+                  <Text style={[styles.detailLabel, { fontFamily }]}>Estado</Text>
+                  <Text style={[styles.detailValue, { fontFamily, color: '#6ee7b7', fontWeight: '600', textTransform: 'capitalize' }]}>
+                    {obtenerNombreEstado(selectedReporte.estado)}
+                  </Text>
+                </View>
+              </View>
+
+              {selectedReporte.empresa && (
+                <View style={styles.detailField}>
+                  <Text style={[styles.detailLabel, { fontFamily }]}>Empresa</Text>
+                  <Text style={[styles.detailValue, { fontFamily }]}>{selectedReporte.empresa}</Text>
+                </View>
+              )}
+
+              {selectedReporte.direccion_sucursal && (
+                <View style={styles.detailField}>
+                  <Text style={[styles.detailLabel, { fontFamily }]}>Dirección</Text>
+                  <Text style={[styles.detailValue, { fontFamily }]}>{selectedReporte.direccion_sucursal}</Text>
+                </View>
+              )}
+
+              <View style={styles.detailField}>
+                <Text style={[styles.detailLabel, { fontFamily }]}>Fecha de creación</Text>
+                <Text style={[styles.detailValue, { fontFamily }]}>
+                  {selectedReporte.created_at
+                    ? new Date(selectedReporte.created_at).toLocaleString()
+                    : 'No disponible'}
+                </Text>
+              </View>
+
+              {selectedReporte.usuario_email && (
+                <View style={styles.detailField}>
+                  <Text style={[styles.detailLabel, { fontFamily }]}>Solicitante</Text>
+                  <Text style={[styles.detailValue, { fontFamily }]}>
+                    {selectedReporte.usuario_nombre} {selectedReporte.usuario_apellido}
+                  </Text>
+                  <Text style={[styles.detailFieldSubtext, { fontFamily }]}>{selectedReporte.usuario_email}</Text>
+                </View>
+              )}
+
+              {(selectedReporte.analisis_general || (selectedReporte.precio_cotizacion && selectedReporte.precio_cotizacion > 0)) && (
+                <>
+                  <View style={[styles.detailSeparator, { marginVertical: 20 }]}>
+                    <View style={styles.separatorLine} />
+                    <Text style={[styles.separatorText, { fontFamily }]}>Información de Cotización</Text>
+                    <View style={styles.separatorLine} />
+                  </View>
+
+                  {selectedReporte.analisis_general && (
+                    <View style={styles.detailField}>
+                      <Text style={[styles.detailLabel, { fontFamily, color: '#f59e0b' }]}>Análisis del técnico</Text>
+                      <Text style={[styles.detailValue, { fontFamily }]}>
+                        {selectedReporte.analisis_general}
+                      </Text>
+                    </View>
+                  )}
+
+                  {selectedReporte.precio_cotizacion && selectedReporte.precio_cotizacion > 0 && (
+                    <View style={styles.detailField}>
+                      <Text style={[styles.detailLabel, { fontFamily, color: '#f59e0b' }]}>Costo de Cotización</Text>
+                      <Text style={[styles.detailValue, { fontFamily, fontSize: 24, fontWeight: '700', color: '#10b981' }]}>
+                        {formatDisplayPrice(selectedReporte.precio_cotizacion, selectedReporte.moneda)}
+                      </Text>
+                    </View>
+                  )}
+                </>
+              )}
+
+
+
+              {/* Fase 2: Detalles del Trabajo Realizado (Técnico) - Solo si está finalizado/cerrado */}
+              {(
+                selectedReporte.estado === 'cerrado' ||
+                selectedReporte.estado === 'resuelto' ||
+                selectedReporte.estado === 'cerrado_por_cliente' ||
+                selectedReporte.estado === 'encuesta_satisfaccion' ||
+                selectedReporte.estado === 'terminado' ||
+                selectedReporte.estado === 'finalizado' ||
+                selectedReporte.estado === 'finalizado_por_tecnico' ||
+                selectedReporte.estado === 'listo_para_encuesta'
+              ) && (selectedReporte.revision || selectedReporte.reparacion || selectedReporte.recomendaciones || selectedReporte.materiales_refacciones || selectedReporte.recomendaciones_adicionales) && (
+                  <>
+                    <View style={[styles.detailSeparator, { marginVertical: 20 }]}>
+                      <View style={styles.separatorLine} />
+                      <Text style={[styles.separatorText, { fontFamily }]}>Trabajo Realizado</Text>
+                      <View style={styles.separatorLine} />
+                    </View>
+
+                    {selectedReporte.revision ? (
+                      <View style={styles.detailField}>
+                        <Text style={[styles.detailLabel, { fontFamily, color: '#67e8f9' }]}>Revisión</Text>
+                        <Text style={[styles.detailValue, { fontFamily }]}>{selectedReporte.revision}</Text>
+                      </View>
+                    ) : null}
+
+                    {selectedReporte.reparacion ? (
+                      <View style={styles.detailField}>
+                        <Text style={[styles.detailLabel, { fontFamily, color: '#67e8f9' }]}>Reparación</Text>
+                        <Text style={[styles.detailValue, { fontFamily }]}>{selectedReporte.reparacion}</Text>
+                      </View>
+                    ) : null}
+
+                    {selectedReporte.materiales_refacciones ? (
+                      <View style={styles.detailField}>
+                        <Text style={[styles.detailLabel, { fontFamily, color: '#67e8f9' }]}>Materiales y Refacciones</Text>
+                        <Text style={[styles.detailValue, { fontFamily }]}>{selectedReporte.materiales_refacciones}</Text>
+                      </View>
+                    ) : null}
+
+                    {selectedReporte.recomendaciones ? (
+                      <View style={styles.detailField}>
+                        <Text style={[styles.detailLabel, { fontFamily, color: '#67e8f9' }]}>Recomendaciones</Text>
+                        <Text style={[styles.detailValue, { fontFamily }]}>{selectedReporte.recomendaciones}</Text>
+                      </View>
+                    ) : null}
+
+                    {selectedReporte.recomendaciones_adicionales ? (
+                      <View style={styles.detailField}>
+                        <Text style={[styles.detailLabel, { fontFamily, color: '#67e8f9' }]}>Recomendaciones Adicionales</Text>
+                        <Text style={[styles.detailValue, { fontFamily }]}>{selectedReporte.recomendaciones_adicionales}</Text>
+                      </View>
+                    ) : null}
+                  </>
+                )}
+              {loadingArchivos ? (
+                <View style={styles.detailField}>
+                  <Text style={[styles.detailLabel, { fontFamily }]}>Cargando archivos...</Text>
+                </View>
+              ) : null}
+
+              {!loadingArchivos && archivosReporte && archivosReporte.length > 0 && (
+                <>
+                  {/* ── Fotos de Revisión (Pre-proceso) ── */}
+                  {!loadingArchivos && archivosReporte && archivosReporte.some((a: any) => a.tipo_archivo === 'foto_revision') && (
+                    <View style={{ width: '100%', marginTop: 20 }}>
+                      <View style={{
+                        flexDirection: 'row', alignItems: 'center', gap: 10,
+                        marginBottom: 14, paddingBottom: 10,
+                        borderBottomWidth: 1, borderBottomColor: 'rgba(59,130,246,0.25)',
+                      }}>
+                        <View style={{ width: 4, height: 18, borderRadius: 3, backgroundColor: '#3b82f6' }} />
+                        <Text style={[styles.detailLabel, { fontFamily, color: '#60a5fa', fontSize: 12, fontWeight: '700', letterSpacing: 0.5 }]}>
+                          IMAGEN PRE-PROCESO (REVISIÓN)
+                        </Text>
+                      </View>
+                      <View style={styles.archivosContainer}>
+                        {archivosReporte.filter((a: any) => a.tipo_archivo === 'foto_revision').map((foto: any, idx: number) => {
+                          const proxyUrl = getProxyUrl(foto.cloudflare_url);
+                          return (
+                            <TouchableOpacity
+                              key={idx}
+                              style={[styles.archivoItem, { borderColor: '#3b82f6', borderWidth: 2 }]}
+                              onPress={() => {
+                                setArchivoVisualizando({
+                                  url: proxyUrl,
+                                  tipo_archivo: 'foto_revision',
+                                  tipo: 'foto_revision',
+                                  nombre: foto.nombre_original || 'Imagen Pre-proceso'
+                                });
+                                setShowArchivoModal(true);
+                              }}
+                            >
+                              <Image source={{ uri: proxyUrl }} style={styles.archivoThumb} />
+                              <Text style={[styles.archivoLabel, { fontFamily, color: '#60a5fa', marginTop: 6 }]}>📷 Pre-proceso</Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    </View>
+                  )}
+
+                  {/* ── IMAGENES DE FINALIZACION ── */}
+                  {!loadingArchivos && archivosReporte && archivosReporte.some((a: any) => a.tipo_archivo === 'foto' && a.nombre_original?.toLowerCase().includes('postproceso')) && (
+                    <View style={{ width: '100%', marginTop: 20 }}>
+                      <View style={{
+                        flexDirection: 'row', alignItems: 'center', gap: 10,
+                        marginBottom: 14, paddingBottom: 10,
+                        borderBottomWidth: 1, borderBottomColor: 'rgba(16,185,129,0.25)',
+                      }}>
+                        <View style={{ width: 4, height: 18, borderRadius: 3, backgroundColor: '#10b981' }} />
+                        <Text style={[styles.detailLabel, { fontFamily, color: '#34d399', fontSize: 12, fontWeight: '700', letterSpacing: 0.5 }]}>
+                          IMAGENES DE FINALIZACION
+                        </Text>
+                      </View>
+                      <View style={styles.archivosContainer}>
+                        {archivosReporte.filter((a: any) => a.tipo_archivo === 'foto' && a.nombre_original?.toLowerCase().includes('postproceso')).map((foto: any, idx: number) => {
+                          const proxyUrl = getProxyUrl(foto.cloudflare_url);
+                          return (
+                            <TouchableOpacity
+                              key={idx}
+                              style={[styles.archivoItem, { borderColor: '#10b981', borderWidth: 2 }]}
+                              onPress={() => {
+                                setArchivoVisualizando({
+                                  url: proxyUrl,
+                                  tipo_archivo: 'foto',
+                                  tipo: 'foto',
+                                  nombre: foto.nombre_original || 'Imagen de Finalización'
+                                });
+                                setShowArchivoModal(true);
+                              }}
+                            >
+                              <Image source={{ uri: proxyUrl }} style={styles.archivoThumb} />
+                              <Text style={[styles.archivoLabel, { fontFamily, color: '#34d399', marginTop: 6 }]}>📷 Finalización</Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    </View>
+                  )}
+
+                  {/* ── Archivos Adjuntos Originales ── */}
+                  <View style={{ width: '100%', marginTop: 20 }}>
+                    <View style={{
+                      flexDirection: 'row', alignItems: 'center', gap: 10,
+                      marginBottom: 14, paddingBottom: 10,
+                      borderBottomWidth: 1, borderBottomColor: '#1e293b',
+                    }}>
+                      <View style={{ width: 4, height: 18, borderRadius: 3, backgroundColor: '#64748b' }} />
+                      <Text style={[styles.detailLabel, { fontFamily, fontSize: 12, fontWeight: '700', letterSpacing: 0.5 }]}>
+                        ARCHIVOS ADJUNTOS ({archivosReporte.filter((a: any) => a.tipo_archivo !== 'audio' && a.tipo_archivo !== 'foto_revision').length})
+                      </Text>
+                    </View>
+                    <View style={styles.archivosContainer}>
+                      {archivosReporte.filter((a: any) =>
+                        a.tipo_archivo !== 'audio' &&
+                        a.tipo_archivo !== 'foto_revision' &&
+                        !(a.tipo_archivo === 'foto' && a.nombre_original?.toLowerCase().includes('postproceso'))
+                      ).map((archivo: any, idx: number) => {
+                        const proxyUrl = getProxyUrl(archivo.cloudflare_url);
+                        return (
+                          <TouchableOpacity
+                            key={idx}
+                            style={styles.archivoItem}
+                            onPress={() => {
+                              if (archivo.tipo_archivo === 'foto') {
+                                setArchivoVisualizando({
+                                  url: proxyUrl,
+                                  tipo: archivo.tipo_archivo,
+                                  nombre: archivo.nombre_original || 'Archivo'
+                                });
+                                setShowArchivoModal(true);
+                                return;
+                              }
+                              openMediaExternally(proxyUrl);
+                            }}
+                          >
+                            {archivo.tipo_archivo === 'foto' ? (
+                              <>
+                                <Image
+                                  source={{ uri: proxyUrl }}
+                                  style={styles.archivoThumb}
+                                  onError={() => logDebug('Error loading image:', proxyUrl)}
+                                />
+                                <Text style={[styles.archivoLabel, { fontFamily, marginTop: 6 }]}>📷 Foto</Text>
+                              </>
+                            ) : (
+                              <>
+                                <View style={styles.videoThumb}>
+                                  <Ionicons name="play-circle" size={44} color="#06b6d4" />
+                                </View>
+                                <Text style={[styles.archivoLabel, { fontFamily, marginTop: 6 }]}>🎥 Video</Text>
+                              </>
+                            )}
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </View>
+                </>
+              )}
+            </ScrollView>
+
+            <View style={[styles.detailFooter, isMobile && { flexDirection: 'column' }]}>
+              <TouchableOpacity
+                onPress={() => {
+                  setShowReporteDetail(false);
+                  setSelectedReporte(null);
+                }}
+                style={[styles.detailCloseButton, isMobile && { flex: 0, width: '100%' }]}
+              >
+                <Text style={[styles.detailCloseButtonText, { fontFamily }]}>Cerrar</Text>
+              </TouchableOpacity>
+
+              {/* Botón Responder Encuesta - solo cuando hubo trabajo y no fue cancelado */}
+              {(
+                selectedReporte.estado === 'cerrado' ||
+                selectedReporte.estado === 'terminado' ||
+                selectedReporte.estado === 'cerrado_por_cliente' ||
+                selectedReporte.estado === 'listo_para_encuesta' ||
+                selectedReporte.estado === 'finalizado_por_tecnico'
+              ) &&
+                selectedReporte.estado !== 'cancelado' &&
+                !selectedReporte.esCancelado &&
+                !encuestasEnviadas.has(selectedReporte.id) &&
+                !encuestasRespondidas.has(selectedReporte.id) && (
+                  <TouchableOpacity
+                    onPress={() => {
+                      // Abrir la encuesta de satisfacción con todos los datos necesarios
+                      router.push({
+                        pathname: '/encuesta',
+                        params: {
+                          reporteId: selectedReporte.id,
+                          clienteEmail: usuario?.email || '',
+                          clienteNombre: usuario?.nombre || '',
+                          empresa: usuario?.empresa || '',
+                          empleadoEmail: selectedReporte.empleado_email || '',
+                          empleadoNombre: selectedReporte.empleado_nombre || ''
+                        }
+                      });
+                      setShowReporteDetail(false);
+                    }}
+                    style={{
+                      flex: isMobile ? 0 : 1,
+                      width: isMobile ? '100%' : 'auto',
+                      backgroundColor: '#f59e0b',
+                      marginLeft: isMobile ? 0 : 12,
+                      borderRadius: 8,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      paddingVertical: 12 // Ensure consistent padding
+                    }}
+                  >
+                    <Text style={[{ color: '#fff', fontSize: 14, fontWeight: '700' }, { fontFamily }]}>
+                      📋 Responder Encuesta
+                    </Text>
+                  </TouchableOpacity>
+                )}
+
+              {/* Botón Descargar PDF para reportes cerrados y en cotización */}
+              {(selectedReporte.estado === 'cerrado' ||
+                selectedReporte.estado === 'cerrado_por_cliente' ||
+                selectedReporte.estado === 'terminado' ||
+                selectedReporte.estado === 'en_cotizacion' ||
+                selectedReporte.estado === 'cotizado' ||
+                selectedReporte.estado === 'en_espera_confirmacion') && (
+                  <TouchableOpacity
+                    disabled={generandoPDF}
+                    onPress={() => {
+                      console.log('[DEBUG] Click en Descargar PDF. Estado generandoPDF:', generandoPDF);
+                      if (generandoPDF) {
+                        console.log('[DEBUG] Evitando clic duplicado (generandoPDF === true)');
+                        return;
+                      }
+                      generarPDF(selectedReporte);
+                    }}
+                    style={{
+                      flex: isMobile ? 0 : 1,
+                      width: isMobile ? '100%' : 'auto',
+                      backgroundColor: generandoPDF ? '#9ca3af' : '#ef4444',
+                      marginLeft: isMobile ? 0 : 12,
+                      borderRadius: 8,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexDirection: 'row',
+                      gap: 8,
+                      paddingVertical: 14 // Match other buttons height
+                    }}
+                  >
+                    {generandoPDF ? (
+                      <ActivityIndicator size="small" color="#fff" />
+                    ) : (
+                      <Ionicons name="document-text-outline" size={20} color="#fff" />
+                    )}
+                    <Text style={[{ color: '#fff', fontSize: 14, fontWeight: '700' }, { fontFamily }]}>
+                      {generandoPDF ? 'Descargando...' : 'Descargar PDF'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+            </View>
+          </View>
+        </View>
+      )
+      }
+
+      {
+        showSuccessOverlay && (
+          <View style={styles.successOverlay}>
+            <View style={[styles.successContainer, {
+              backgroundColor: '#d1d1d1ff',
+              borderRadius: 16,
+              padding: 32,
+              maxWidth: 400,
+              shadowColor: '#000',
+              shadowOffset: { width: 0, height: 4 },
+              shadowOpacity: 0.15,
+              shadowRadius: 12,
+              elevation: 8,
+            }]}>
+              <View style={{ alignItems: 'center', marginBottom: 20 }}>
+                <View style={{
+                  width: 64,
+                  height: 64,
+                  borderRadius: 32,
+                  backgroundColor: '#10b981',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  marginBottom: 16,
+                }}>
+                  <Ionicons name="checkmark" size={36} color="#ffffff" />
+                </View>
+                <Text style={[{
+                  fontSize: 24,
+                  fontWeight: '700',
+                  color: '#1f2937',
+                  marginBottom: 8,
+                  textAlign: 'center',
+                }, { fontFamily }]}>
+                  ¡Reporte enviado!
+                </Text>
+              </View>
+              <Text style={[{
+                fontSize: 15,
+                color: '#6b7280',
+                textAlign: 'center',
+                lineHeight: 22,
+                marginBottom: 24,
+              }, { fontFamily }]}>
+                Tu reporte se generó exitosamente. El equipo lo revisará en breve.
+              </Text>
+              <TouchableOpacity
+                onPress={() => setShowSuccessOverlay(false)}
+                style={{
+                  backgroundColor: '#10b981',
+                  paddingVertical: 14,
+                  paddingHorizontal: 24,
+                  borderRadius: 10,
+                  alignItems: 'center',
+                }}
+                activeOpacity={0.8}
+              >
+                <Text style={[{
+                  color: '#ffffff',
+                  fontSize: 16,
+                  fontWeight: '600',
+                }, { fontFamily }]}>
+                  Entendido
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )
+      }
+
+      {/* Modal Cotizaciones */}
+      {
+        showCotizacionesModal && (
+          <View style={styles.overlay}>
+            <View style={[styles.largeModal, { flex: 1, flexDirection: 'column', paddingTop: isMobile ? 60 : 0 }]}>
+              <View style={styles.largeModalHeader}>
+                <View style={{ flex: 1 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <Text style={[styles.largeModalTitle, { fontFamily }]}>Cotizaciones</Text>
+                  </View>
+                  <Text style={[styles.largeModalSubtitle, { fontFamily }]}>Cotizaciones de tus reportes</Text>
+                </View>
+                <View style={{ flexDirection: 'row', gap: 8 }}>
+                  <TouchableOpacity
+                    onPress={() => cargarCotizaciones(usuario?.email)}
+                    style={[styles.refreshButton, loadingCotizaciones && styles.refreshButtonDisabled, { flexDirection: 'row', alignItems: 'center', gap: 6 }]}
+                    disabled={loadingCotizaciones}
+                  >
+                    <Animated.View style={{ transform: [{ rotate: spin }] }}>
+                      <Ionicons name="refresh" size={14} color="#67e8f9" />
+                    </Animated.View>
+                    <Text style={[styles.refreshButtonText, { fontFamily }]}>Actualizar</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity onPress={() => {
+                    setShowCotizacionesModal(false);
+                    setCotizaciones([]);
+                  }} style={styles.closeButton}>
+                    <Ionicons name="close" size={20} color="#cbd5e1" />
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              {/* ─── Panel de filtros avanzado: Cotizaciones ─── */}
+              <View style={styles.filtroPanel}>
+                <View style={styles.filtroPanelHeader}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Ionicons name="options-outline" size={16} color="#06b6d4" />
+                    <Text style={[styles.filtroTitulo, { fontFamily }]}>Filtros</Text>
+                    {(filtroID.trim() || filtroFecha.trim() || searchQuery.trim()) && (
+                      <View style={{ backgroundColor: '#06b6d4', borderRadius: 10, paddingHorizontal: 7, paddingVertical: 1 }}>
+                        <Text style={{ color: '#fff', fontSize: 11, fontWeight: '700' }}>
+                          {(filtroID.trim() ? 1 : 0) + (filtroFecha.trim() ? 1 : 0) + (searchQuery.trim() ? 1 : 0)}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    {(filtroID.trim() || filtroFecha.trim() || searchQuery.trim()) && (
+                      <TouchableOpacity onPress={limpiarFiltros} style={styles.limpiarFiltrosButtonSmall}>
+                        <Ionicons name="close-circle" size={16} color="#f87171" />
+                        <Text style={[styles.limpiarFiltrosTextSmall, { fontFamily }]}>Limpiar</Text>
+                      </TouchableOpacity>
+                    )}
+                    <TouchableOpacity onPress={() => setShowFiltros(prev => !prev)}>
+                      <Ionicons name={showFiltros ? 'chevron-up' : 'chevron-down'} size={20} color="#94a3b8" />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                {showFiltros && (
+                  <>
+                    {/* Fila 1: Equipo + ID */}
+                    <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? 12 : 20, marginBottom: 20 }}>
+                      <View style={[styles.searchFilterContainerPro, isMobile ? styles.searchFilterContainerMobile : { flex: 1 }]}>
+                        {!isMobile && (
+                          <View style={[styles.searchFilterLabelPro, { marginBottom: 8 }]}>
+                            <Text style={[styles.searchFilterLabelText, { fontFamily }]}>Buscar por Equipo / Servicio</Text>
+                          </View>
+                        )}
+                        <View style={[
+                          styles.searchFilterInputWrapperPro,
+                          searchQuery.length > 0 && styles.searchFilterInputWrapperFocused,
+                          isMobile && { height: 44, backgroundColor: 'rgba(15, 23, 42, 0.4)' }
+                        ]}>
+                          <View style={{ width: 24, alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                            <Ionicons name="search-outline" size={isMobile ? 14 : 18} color={searchQuery.length > 0 ? '#06b6d4' : '#64748b'} />
+                          </View>
+                          <TextInput
+                            style={[styles.searchInputPro, { fontFamily, paddingVertical: isMobile ? 8 : 12 }, isMobile && { fontSize: 13 }]}
+                            placeholder={isMobile ? "Equipo o comentario" : "Nombre de equipo..."}
+                            placeholderTextColor="#64748b"
+                            value={searchQuery}
+                            onChangeText={setSearchQuery}
+                          />
+                          {searchQuery.length > 0 && (
+                            <TouchableOpacity onPress={() => setSearchQuery('')} style={{ padding: 4 }}>
+                              <Ionicons name="close-circle" size={isMobile ? 16 : 20} color="#64748b" />
+                            </TouchableOpacity>
+                          )}
+                        </View>
+                      </View>
+                      <View style={[styles.searchFilterContainerPro, isMobile ? styles.searchFilterContainerMobile : { flex: 1 }]}>
+                        {!isMobile && (
+                          <View style={[styles.searchFilterLabelPro, { marginBottom: 8 }]}>
+                            <Text style={[styles.searchFilterLabelText, { fontFamily }]}>ID</Text>
+                          </View>
+                        )}
+                        <View style={[
+                          styles.searchFilterInputWrapperPro,
+                          filtroID.length > 0 && styles.searchFilterInputWrapperFocused,
+                          isMobile && { height: 44, backgroundColor: 'rgba(15, 23, 42, 0.4)' }
+                        ]}>
+                          <View style={{ width: 24, alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                            <Ionicons name="finger-print-outline" size={isMobile ? 14 : 18} color={filtroID.length > 0 ? '#06b6d4' : '#64748b'} />
+                          </View>
+                          <TextInput
+                            style={[styles.searchInputPro, { fontFamily, paddingVertical: isMobile ? 8 : 12 }, isMobile && { fontSize: 13 }]}
+                            placeholder="ID..."
+                            placeholderTextColor="#64748b"
+                            value={filtroID}
+                            onChangeText={setFiltroID}
+                          />
+                          {filtroID.length > 0 && (
+                            <TouchableOpacity onPress={() => setFiltroID('')} style={{ padding: 4 }}>
+                              <Ionicons name="close-circle" size={isMobile ? 16 : 20} color="#64748b" />
+                            </TouchableOpacity>
+                          )}
+                        </View>
+                      </View>
+                    </View>
+
+                    {/* Fila 2: Fecha */}
+                    <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? 12 : 20 }}>
+                      <View style={[styles.searchFilterContainerPro, isMobile ? styles.searchFilterContainerMobile : { flex: 1 }]}>
+                        {!isMobile && (
+                          <View style={[styles.searchFilterLabelPro, { marginBottom: 8 }]}>
+                            <Text style={[styles.searchFilterLabelText, { fontFamily }]}>Fecha</Text>
+                          </View>
+                        )}
+                        <View style={[
+                          styles.searchFilterInputWrapperPro,
+                          filtroFecha.length > 0 && styles.searchFilterInputWrapperFocused,
+                          isMobile && { height: 44, backgroundColor: 'rgba(15, 23, 42, 0.4)' }
+                        ]}>
+                          <CustomDatePicker
+                            value={filtroFecha}
+                            onChange={setFiltroFecha}
+                            isMobile={isMobile}
+                            fontFamily={fontFamily}
+                          />
+                        </View>
+                      </View>
+                    </View>
+
+                    <View style={styles.filtrosResultados}>
+                      <Ionicons name="document-text-outline" size={14} color="#94a3b8" />
+                      <Text style={[styles.filtrosResultadosText, { fontFamily }]}>
+                        Mostrando {cotizacionesFiltradas.length} de {cotizaciones.length} cotizaciones
+                      </Text>
+                    </View>
+                  </>
+                )}
+              </View>
+
+              {loadingCotizaciones && (
+                <View style={styles.infoBox}>
+                  <Text style={[styles.infoText, { fontFamily }]}>Cargando cotizaciones...</Text>
+                </View>
+              )}
+
+              {!loadingCotizaciones && cotizacionesFiltradas.length === 0 && (
+                <View style={styles.infoBox}>
+                  <Text style={[styles.infoText, { fontFamily }]}>
+                    {searchQuery ? 'No se encontraron cotizaciones.' : 'No tienes cotizaciones pendientes.'}
+                  </Text>
+                </View>
+              )}
+
+              {!loadingCotizaciones && cotizacionesFiltradas.length > 0 && (
+                <View style={{ flex: 1, width: '100%' }}>
+                  <View style={{ alignItems: 'center', marginVertical: 12 }}>
+                    <View style={{ backgroundColor: '#10b98120', paddingHorizontal: 16, paddingVertical: 6, borderRadius: 20 }}>
+                      <Text style={[styles.infoText, { fontFamily, color: '#10b981', fontSize: 13, fontWeight: '600' }]}>
+                        Mostrando {cotizacionesFiltradas.length} cotizacion{cotizacionesFiltradas.length !== 1 ? 'es' : ''}
+                      </Text>
+                    </View>
+                  </View>
+                  <ScrollView
+                    style={{ flex: 1 }}
+                    showsVerticalScrollIndicator={false}
+                    contentContainerStyle={{ paddingHorizontal: 16, paddingVertical: 12, gap: 12 }}
+                  >
+                    {cotizacionesFiltradas.map((cot: any) => {
+                      logDebug('[RENDER] Renderizando cotización:', cot.id, cot.estado);
+                      return (
+                        <View
+                          key={cot.id}
+                          style={styles.reportCard}
+                        >
+                          <View style={styles.reportHeader}>
+                            <View style={[styles.reportHeaderText, { gap: 6 }]}>
+                              {/* 1. Nombre del Equipo e ID */}
+                              <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
+                                <Text style={[styles.reportTitle, { fontFamily, fontSize: 16 }]} numberOfLines={2}>
+                                  {cot.equipo_descripcion || cot.reportes?.equipo_descripcion || 'Equipo'}
+                                </Text>
+                                <View style={{ backgroundColor: 'rgba(56, 189, 248, 0.1)', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 4, borderWidth: 1, borderColor: 'rgba(56, 189, 248, 0.2)', marginTop: 2 }}>
+                                  <Text style={{ color: '#38bdf8', fontSize: 10, fontWeight: '700', fontFamily }}>Reporte ID: {cot.reporte_id || cot.id}</Text>
+                                </View>
+                              </View>
+
+                              {/* 2. Modelo y Serie (extraídos de descripcion) */}
+                              {(() => {
+                                const desc = cot.descripcion || '';
+                                const modeloMatch = desc.match(/Modelo:\s*([^\n]+)/i);
+                                const serieMatch = desc.match(/Serie:\s*([^\n]+)/i);
+                                const modelo = modeloMatch ? modeloMatch[1].trim() : '';
+                                const serie = serieMatch ? serieMatch[1].trim() : '';
+
+                                if (modelo || serie) {
+                                  return (
+                                    <View style={{ gap: 2 }}>
+                                      {modelo && (
+                                        <Text style={[styles.reportSubtitle, { fontFamily, color: '#94a3b8' }]} numberOfLines={1}>
+                                          Modelo: {modelo}
+                                        </Text>
+                                      )}
+                                      {serie && (
+                                        <Text style={[styles.reportSubtitle, { fontFamily, color: '#94a3b8' }]} numberOfLines={1}>
+                                          Serie: {serie}
+                                        </Text>
+                                      )}
+                                    </View>
+                                  );
+                                }
+                                return null;
+                              })()}
+
+                              {/* Fecha */}
+                              <Text style={[styles.reportMeta, { fontFamily }]} numberOfLines={1}>
+                                {new Date(cot.created_at).toLocaleDateString('es-ES')}
+                              </Text>
+
+                              {cot.precio_cotizacion && parseFloat(cot.precio_cotizacion) > 0 ? (
+                                <Text style={[styles.reportTitle, { fontFamily, color: '#f59e0b', marginTop: 4, fontSize: 18 }]}>
+                                  {formatDisplayPrice(cot.precio_cotizacion, cot.moneda)}
+                                </Text>
+                              ) : (
+                                <View style={[styles.statusBadgePending, { marginVertical: 12 }]}>
+                                  <Ionicons name="time-outline" size={isMobile ? 12 : 14} color="#f59e0b" />
+                                  <Text style={[styles.statusBadgeTextPending, { fontFamily, fontSize: isMobile ? 10 : 12 }]}>
+                                    PENDIENTE DE COTIZACIÓN
+                                  </Text>
+                                </View>
+                              )}
+
+                              <Text
+                                style={[styles.reportSubtitle, { fontFamily, color: '#cbd5e1', marginTop: 6 }]}
+                                numberOfLines={2}
+                              >
+                                {`Recotización: ${cot.cotizacion_explicacion?.trim() || 'Sin recotización'}`}
+                              </Text>
+                            </View>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+
+                              <TouchableOpacity
+                                onPress={async () => {
+                                  logDebug('[DEBUG] Presionando ojo de cotización:', cot.id);
+                                  logDebug('[DEBUG] Cotización completa:', JSON.stringify(cot, null, 2));
+                                  setCotizacionSeleccionada(cot);
+                                  setShowCotizacionDetalleModal(true);
+
+                                  // Buscar si hay un PDF adjunto para esta cotización
+                                  const reporteId = cot.reporte_id || cot.id;
+                                  logDebug('[DEBUG] Buscando archivos para reporteId:', reporteId);
+
+                                  if (reporteId) {
+                                    try {
+                                      setLoadingArchivosCotizacion(true);
+                                      const { success, data, error } = await obtenerArchivosReporteBackend(reporteId);
+                                      logDebug('[DEBUG] Resultado obtención archivos:', { success, dataLength: data?.length, error });
+
+                                      if (success && data) {
+                                        const pdf = data.find((a: any) => a.tipo_archivo === 'pdf');
+                                        logDebug('[DEBUG] PDF encontrado:', pdf ? pdf.nombre_original : 'NINGUNO');
+                                        setArchivoPDFCotizacion(pdf || null);
+
+                                        // Guardamos todos los archivos multimedia para la galería
+                                        const soloMedia = data.filter((a: any) => a.tipo_archivo !== 'pdf' && a.tipo_archivo !== 'audio');
+                                        setArchivosCotizacion(soloMedia);
+                                      }
+                                    } catch (err) {
+                                      console.error('[CLIENTE] Error al buscar archivos de cotización:', err);
+                                    } finally {
+                                      setLoadingArchivosCotizacion(false);
+                                    }
+                                  }
+                                }}
+                                style={styles.eyeButton}
+                              >
+                                <Ionicons name="eye-outline" size={16} color="#06b6d4" />
+                              </TouchableOpacity>
+                            </View>
+                          </View>
+                        </View>
+                      );
+                    })}
+                  </ScrollView>
+                </View>
+              )}
+            </View>
+          </View>
+        )
+      }
+
+      {/* Modal Detalle Cotización */}
+      {
+        showCotizacionDetalleModal && cotizacionSeleccionada && (
+          <View style={styles.overlay}>
+            <View style={[styles.largeModal, { flex: 1, flexDirection: 'column', paddingTop: isMobile ? 60 : 0 }]}>
+              <View style={styles.largeModalHeader}>
+                <View style={{ flex: 1 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 10, flexWrap: 'wrap' }}>
+                    <Text style={[styles.largeModalTitle, { fontFamily }]}>Detalle de Cotización</Text>
+                    <View style={{ backgroundColor: 'rgba(56, 189, 248, 0.15)', paddingHorizontal: 10, paddingVertical: 3, borderRadius: 6, borderWidth: 1, borderColor: 'rgba(56, 189, 248, 0.3)', marginTop: 2 }}>
+                      <Text style={{ color: '#38bdf8', fontSize: 11, fontWeight: '800', fontFamily }}>Reporte ID: {cotizacionSeleccionada.reporte_id || cotizacionSeleccionada.id}</Text>
+                    </View>
+                  </View>
+                  <Text style={[styles.largeModalSubtitle, { fontFamily }]}>Revisión de cotización</Text>
+                </View>
+                <TouchableOpacity onPress={() => {
+                  setShowCotizacionDetalleModal(false);
+                  setCotizacionSeleccionada(null);
+                  setArchivoPDFCotizacion(null);
+                }} style={styles.closeButton}>
+                  <Ionicons name="close" size={20} color="#cbd5e1" />
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView style={[styles.listScroll, { flex: 1 }]} showsVerticalScrollIndicator={false}>
+                <View style={styles.detailContent}>
+                  {/* Información del reporte */}
+                  <View style={styles.detailSection}>
+                    <Text style={[styles.detailSectionTitle, { fontFamily }]}>Información del Reporte</Text>
+                    <View style={styles.detailField}>
+                      <Text style={[styles.detailLabel, { fontFamily }]}>Equipo/Servicio</Text>
+                      <Text style={[styles.detailValue, { fontFamily }]}>{cotizacionSeleccionada.equipo_descripcion || 'N/A'}</Text>
+                    </View>
+
+                    {/* Parsear descripcion para obtener Modelo, Serie, Sucursal, Prioridad */}
+                    {(() => {
+                      const desc = cotizacionSeleccionada.descripcion || '';
+                      const modeloMatch = desc.match(/Modelo:\s*([^\n]+)/i);
+                      const serieMatch = desc.match(/Serie:\s*([^\n]+)/i);
+                      const sucursalMatch = desc.match(/Sucursal:\s*([^\n]+)/i);
+                      const prioridadMatch = desc.match(/Prioridad:\s*([^\n]+)/i);
+                      // El comentario real suele estar después de "Comentario:"
+                      const comentarioRealMatch = desc.match(/Comentario:\s*([^\n]+)/i);
+
+                      const modelo = modeloMatch ? modeloMatch[1].trim() : null;
+                      const serie = serieMatch ? serieMatch[1].trim() : null;
+                      const sucursal = sucursalMatch ? sucursalMatch[1].trim() : null;
+                      const prioridad = prioridadMatch ? prioridadMatch[1].trim() : null;
+                      const comentarioReal = comentarioRealMatch ? comentarioRealMatch[1].trim() : (cotizacionSeleccionada.comentario || desc);
+
+                      return (
+                        <>
+                          {modelo && (
+                            <View style={styles.detailField}>
+                              <Text style={[styles.detailLabel, { fontFamily }]}>Modelo</Text>
+                              <Text style={[styles.detailValue, { fontFamily }]}>{modelo}</Text>
+                            </View>
+                          )}
+                          {serie && (
+                            <View style={styles.detailField}>
+                              <Text style={[styles.detailLabel, { fontFamily }]}>Serie</Text>
+                              <Text style={[styles.detailValue, { fontFamily }]}>{serie}</Text>
+                            </View>
+                          )}
+                          {sucursal && (
+                            <View style={styles.detailField}>
+                              <Text style={[styles.detailLabel, { fontFamily }]}>Sucursal</Text>
+                              <Text style={[styles.detailValue, { fontFamily }]}>{sucursal}</Text>
+                            </View>
+                          )}
+                          <View style={styles.detailField}>
+                            <Text style={[styles.detailLabel, { fontFamily }]}>Comentario</Text>
+                            <Text style={[styles.detailValue, { fontFamily }]}>{comentarioReal || 'N/A'}</Text>
+                          </View>
+                          {prioridad && (
+                            <View style={styles.detailField}>
+                              <Text style={[styles.detailLabel, { fontFamily }]}>Prioridad</Text>
+                              <Text style={[styles.detailValue, { fontFamily }]}>{prioridad}</Text>
+                            </View>
+                          )}
+                        </>
+                      );
+                    })()}
+                  </View>
+
+                  {/* Información de la cotización */}
+                  <View style={styles.detailSection}>
+                    <Text style={[styles.detailSectionTitle, { fontFamily }]}>Información de la Cotización</Text>
+                    <View style={styles.detailField}>
+                      <Text style={[styles.detailLabel, { fontFamily }]}>Empleado</Text>
+                      <Text style={[styles.detailValue, { fontFamily }]}>{cotizacionSeleccionada.empleado_nombre || 'N/A'}</Text>
+                    </View>
+                    <View style={styles.detailField}>
+                      <Text style={[styles.detailLabel, { fontFamily }]}>ANALISIS GENERAL</Text>
+                      <Text style={[styles.detailValue, { fontFamily }]}>{cotizacionSeleccionada.analisis_general || 'N/A'}</Text>
+                    </View>
+
+                    {/* Datos de reparación express — se muestran solo si existen */}
+                    {cotizacionSeleccionada.reparacion && (
+                      <View style={styles.detailField}>
+                        <Text style={[styles.detailLabel, { fontFamily }]}>REPARACIÓN REALIZADA</Text>
+                        <Text style={[styles.detailValue, { fontFamily }]}>{cotizacionSeleccionada.reparacion}</Text>
+                      </View>
+                    )}
+
+                    {cotizacionSeleccionada.materiales_refacciones && (
+                      <View style={styles.detailField}>
+                        <Text style={[styles.detailLabel, { fontFamily }]}>MATERIALES / REFACCIONES</Text>
+                        <Text style={[styles.detailValue, { fontFamily }]}>{cotizacionSeleccionada.materiales_refacciones}</Text>
+                      </View>
+                    )}
+
+                    {cotizacionSeleccionada.recomendaciones && (
+                      <View style={styles.detailField}>
+                        <Text style={[styles.detailLabel, { fontFamily }]}>RECOMENDACIONES</Text>
+                        <Text style={[styles.detailValue, { fontFamily }]}>{cotizacionSeleccionada.recomendaciones}</Text>
+                      </View>
+                    )}
+
+                    {cotizacionSeleccionada.recomendaciones_adicionales && (
+                      <View style={styles.detailField}>
+                        <Text style={[styles.detailLabel, { fontFamily }]}>RECOMENDACIONES ADICIONALES</Text>
+                        <Text style={[styles.detailValue, { fontFamily }]}>{cotizacionSeleccionada.recomendaciones_adicionales}</Text>
+                      </View>
+                    )}
+
+                    <View style={styles.detailField}>
+                      <Text style={[styles.detailLabel, { fontFamily }]}>Precio Cotizado</Text>
+                      {(parseFloat(cotizacionSeleccionada.precio_cotizacion) > 0 && (cotizacionSeleccionada.estado || '').toLowerCase() !== 'en_cotizacion') ? (
+                        <Text style={[styles.detailValue, { fontFamily, fontSize: 18, fontWeight: 'bold', color: '#f59e0b' }]}>
+                          {formatDisplayPrice(cotizacionSeleccionada.precio_cotizacion, cotizacionSeleccionada.moneda)}
+                        </Text>
+                      ) : (
+                        <View style={[styles.statusBadgePending, { marginVertical: 4 }]}>
+                          <Ionicons name="time-outline" size={isMobile ? 12 : 14} color="#f59e0b" />
+                          <Text style={[styles.statusBadgeTextPending, { fontFamily, fontSize: isMobile ? 10 : 12 }]}>
+                            EN PROCESO DE COTIZACIÓN
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+
+                    <View style={styles.detailField}>
+                      <Text style={[styles.detailLabel, { fontFamily }]}>Explicación de Recotización</Text>
+                      <Text style={[styles.detailValue, { fontFamily }]}>
+                        {cotizacionSeleccionada.cotizacion_explicacion?.trim() || 'Sin recotización'}
+                      </Text>
+                    </View>
+
+                    {loadingArchivosCotizacion ? (
+                      <View style={{ marginTop: 20, alignItems: 'center' }}>
+                        <Text style={{ color: '#94a3b8', fontFamily }}>Cargando imágenes...</Text>
+                      </View>
+                    ) : (
+                      <>
+                        {/* ── Fotos de Revisión (Pre-proceso) ── */}
+                        {archivosCotizacion.some((a: any) => a.tipo_archivo === 'foto_revision') && (
+                          <View style={{ width: '100%', marginTop: 20 }}>
+                            <View style={{
+                              flexDirection: 'row', alignItems: 'center', gap: 10,
+                              marginBottom: 14, paddingBottom: 10,
+                              borderBottomWidth: 1, borderBottomColor: 'rgba(59,130,246,0.25)',
+                            }}>
+                              <View style={{ width: 4, height: 18, borderRadius: 3, backgroundColor: '#3b82f6' }} />
+                              <Text style={[styles.detailLabel, { fontFamily, color: '#60a5fa', fontSize: 12, fontWeight: '700', letterSpacing: 0.5 }]}>
+                                IMAGEN PRE-PROCESO (REVISIÓN)
+                              </Text>
+                            </View>
+                            <View style={styles.archivosContainer}>
+                              {archivosCotizacion.filter((a: any) => a.tipo_archivo === 'foto_revision').map((foto: any, idx: number) => {
+                                const proxyUrl = getProxyUrl(foto.cloudflare_url);
+                                return (
+                                  <TouchableOpacity
+                                    key={idx}
+                                    style={[styles.archivoItem, { borderColor: '#3b82f6', borderWidth: 2 }]}
+                                    onPress={() => {
+                                      setArchivoVisualizando({
+                                        url: proxyUrl,
+                                        tipo_archivo: 'foto_revision',
+                                        tipo: 'foto_revision',
+                                        nombre: foto.nombre_original || 'Imagen Pre-proceso'
+                                      });
+                                      setShowArchivoModal(true);
+                                    }}
+                                  >
+                                    <Image source={{ uri: proxyUrl }} style={styles.archivoThumb} />
+                                    <Text style={[styles.archivoLabel, { fontFamily, color: '#60a5fa', marginTop: 6 }]}>📷 Pre-proceso</Text>
+                                  </TouchableOpacity>
+                                );
+                              })}
+                            </View>
+                          </View>
+                        )}
+
+                        {/* ── IMAGENES DE FINALIZACION ── */}
+                        {archivosCotizacion.some((a: any) => a.tipo_archivo === 'foto' && a.nombre_original?.toLowerCase().includes('postproceso')) && (
+                          <View style={{ width: '100%', marginTop: 20 }}>
+                            <View style={{
+                              flexDirection: 'row', alignItems: 'center', gap: 10,
+                              marginBottom: 14, paddingBottom: 10,
+                              borderBottomWidth: 1, borderBottomColor: 'rgba(16,185,129,0.25)',
+                            }}>
+                              <View style={{ width: 4, height: 18, borderRadius: 3, backgroundColor: '#10b981' }} />
+                              <Text style={[styles.detailLabel, { fontFamily, color: '#34d399', fontSize: 12, fontWeight: '700', letterSpacing: 0.5 }]}>
+                                IMAGENES DE FINALIZACION
+                              </Text>
+                            </View>
+                            <View style={styles.archivosContainer}>
+                              {archivosCotizacion.filter((a: any) => a.tipo_archivo === 'foto' && a.nombre_original?.toLowerCase().includes('postproceso')).map((foto: any, idx: number) => {
+                                const proxyUrl = getProxyUrl(foto.cloudflare_url);
+                                return (
+                                  <TouchableOpacity
+                                    key={idx}
+                                    style={[styles.archivoItem, { borderColor: '#10b981', borderWidth: 2 }]}
+                                    onPress={() => {
+                                      setArchivoVisualizando({
+                                        url: proxyUrl,
+                                        tipo_archivo: 'foto',
+                                        tipo: 'foto',
+                                        nombre: foto.nombre_original || 'Imagen de Finalización'
+                                      });
+                                      setShowArchivoModal(true);
+                                    }}
+                                  >
+                                    <Image source={{ uri: proxyUrl }} style={styles.archivoThumb} />
+                                    <Text style={[styles.archivoLabel, { fontFamily, color: '#34d399', marginTop: 6 }]}>📷 Finalización</Text>
+                                  </TouchableOpacity>
+                                );
+                              })}
+                            </View>
+                          </View>
+                        )}
+
+                        {/* ── OTROS ARCHIVOS ADJUNTOS ── */}
+                        {archivosCotizacion.some((a: any) =>
+                          a.tipo_archivo !== 'audio' &&
+                          a.tipo_archivo !== 'pdf' &&
+                          a.tipo_archivo !== 'foto_revision' &&
+                          !(a.tipo_archivo === 'foto' && a.nombre_original?.toLowerCase().includes('postproceso'))
+                        ) && (
+                            <View style={{ width: '100%', marginTop: 20 }}>
+                              <View style={{
+                                flexDirection: 'row', alignItems: 'center', gap: 10,
+                                marginBottom: 14, paddingBottom: 10,
+                                borderBottomWidth: 1, borderBottomColor: 'rgba(148,163,184,0.25)',
+                              }}>
+                                <View style={{ width: 4, height: 18, borderRadius: 3, backgroundColor: '#94a3b8' }} />
+                                <Text style={[styles.detailLabel, { fontFamily, color: '#94a3b8', fontSize: 12, fontWeight: '700', letterSpacing: 0.5 }]}>
+                                  OTROS ARCHIVOS ADJUNTOS
+                                </Text>
+                              </View>
+                              <View style={styles.archivosContainer}>
+                                {archivosCotizacion.filter((a: any) =>
+                                  a.tipo_archivo !== 'audio' &&
+                                  a.tipo_archivo !== 'pdf' &&
+                                  a.tipo_archivo !== 'foto_revision' &&
+                                  !(a.tipo_archivo === 'foto' && a.nombre_original?.toLowerCase().includes('postproceso'))
+                                ).map((archivo, idx) => {
+                                  const proxyUrl = getProxyUrl(archivo.cloudflare_url);
+                                  return (
+                                    <TouchableOpacity
+                                      key={idx}
+                                      style={styles.archivoItem}
+                                      onPress={() => {
+                                        if (archivo.tipo_archivo === 'foto' || archivo.tipo_archivo === 'imagen' || archivo.tipo_archivo?.startsWith('image/')) {
+                                          setArchivoVisualizando({
+                                            url: proxyUrl,
+                                            tipo_archivo: archivo.tipo_archivo,
+                                            tipo: archivo.tipo_archivo,
+                                            nombre: archivo.nombre_original || 'Archivo'
+                                          });
+                                          setShowArchivoModal(true);
+                                        } else if (archivo.tipo_archivo === 'video' || archivo.tipo_archivo?.startsWith('video/')) {
+                                          setArchivoVisualizando({
+                                            url: proxyUrl,
+                                            tipo_archivo: 'video',
+                                            nombre: archivo.nombre_original || 'Video'
+                                          });
+                                          setShowArchivoModal(true);
+                                        }
+                                      }}
+                                    >
+                                      <View style={styles.archivoThumb}>
+                                        {archivo.tipo_archivo === 'video' || archivo.tipo_archivo?.startsWith('video/') ? (
+                                          <View style={{ flex: 1, backgroundColor: '#1e293b', justifyContent: 'center', alignItems: 'center' }}>
+                                            <Ionicons name="play-circle" size={32} color="#60a5fa" />
+                                          </View>
+                                        ) : (
+                                          <Image source={{ uri: proxyUrl }} style={{ flex: 1 }} />
+                                        )}
+                                      </View>
+                                      <Text style={[styles.archivoLabel, { fontFamily, fontSize: 10 }]} numberOfLines={1}>
+                                        {archivo.nombre_original || 'Adjunto'}
+                                      </Text>
+                                    </TouchableOpacity>
+                                  );
+                                })}
+                              </View>
+                            </View>
+                          )}
+                      </>
+                    )}
+
+                  </View>
+
+                  {/* PDF de la cotización */}
+                  {archivoPDFCotizacion && (
+                    <View style={[styles.detailSection, { marginTop: 10, borderColor: '#8b5cf6', borderWidth: 1.5, backgroundColor: 'rgba(139, 92, 246, 0.05)' }]}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+                        <View style={{ backgroundColor: 'rgba(139, 92, 246, 0.2)', padding: 8, borderRadius: 10 }}>
+                          <Ionicons name="document-text" size={24} color="#a78bfa" />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={[styles.detailSectionTitle, { color: '#a78bfa', marginBottom: 2, fontFamily }]}>Cotización Formal (PDF)</Text>
+                          <Text style={{ color: '#94a3b8', fontSize: 12, fontFamily }}>Documento adjunto por administración</Text>
+                        </View>
+                      </View>
+
+                      <TouchableOpacity
+                        style={{
+                          backgroundColor: '#8b5cf6',
+                          borderRadius: 10,
+                          paddingVertical: 12,
+                          paddingHorizontal: 16,
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: 10,
+                        }}
+                        onPress={() => {
+                          const proxyUrl = getProxyUrl(archivoPDFCotizacion.cloudflare_url);
+                          Linking.openURL(proxyUrl);
+                        }}
+                      >
+                        <Ionicons name="download-outline" size={20} color="white" />
+                        <Text style={{ color: 'white', fontWeight: '700', fontSize: 14, fontFamily }}>Ver / Descargar Cotización PDF</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+
+                  {/* Acciones */}
+                  {(cotizacionSeleccionada.estado === 'cotizado' || cotizacionSeleccionada.estado === 'en_espera_confirmacion' || cotizacionSeleccionada.estado === 'cotizacionnueva' || cotizacionSeleccionada.estado === 'revision pendiente cotizacion' || cotizacionSeleccionada.estado === 'revision pendiente cotizacion(nueva)') && (
+                    <View style={styles.detailActions}>
+                      <TouchableOpacity
+                        style={[styles.actionButton, { backgroundColor: '#10b981' }]}
+                        onPress={async () => {
+                          try {
+                            // Cuando el cliente acepta, cambiar estado a 'aceptado_por_cliente' (o cerrado_por_cliente si express)
+                            logDebug('[CLIENTE] Aceptando cotización...');
+
+                            let nuevoEstado = 'aceptado_por_cliente';
+                            if (cotizacionSeleccionada.estado === 'revision pendiente cotizacion' || cotizacionSeleccionada.estado === 'revision pendiente cotizacion(nueva)') {
+                              nuevoEstado = 'cerrado_por_cliente';
+                            }
+
+                            const resultado = await actualizarReporteBackend(cotizacionSeleccionada.id, {
+                              estado: nuevoEstado
+                            });
+
+                            if (!resultado.success) {
+                              showToast('Error al aceptar cotización', 'error');
+                              return;
+                            }
+
+                            // Remover de la lista local inmediatamente
+                            setCotizaciones((prev) =>
+                              prev.filter((c) => c.id !== cotizacionSeleccionada.id)
+                            );
+
+                            // Cerrar el modal inmediatamente
+                            setShowCotizacionDetalleModal(false);
+
+                            showToast(nuevoEstado === 'cerrado_por_cliente' ? 'Aceptada. Reporte finalizado (Express).' : 'Cotización aceptada. El técnico puede comenzar el trabajo.', 'success');
+
+                            // Recargar cotizaciones en background sin bloquear
+                            setTimeout(() => {
+                              cargarCotizaciones(usuario?.email);
+                            }, 500);
+                          } catch (error) {
+                            console.error('[CLIENTE] Error:', error);
+                            showToast('Error al aceptar cotización', 'error');
+                          }
+                        }}
+                      >
+                        <Ionicons name="checkmark-circle" size={20} color="white" />
+                        <Text style={[styles.actionButtonText, { fontFamily }]}>Aceptar</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.actionButton, { backgroundColor: '#ef4444' }]}
+                        onPress={() => {
+                          setReporteARechazar(cotizacionSeleccionada);
+                          if (cotizacionSeleccionada.estado === 'revision pendiente cotizacion') {
+                            setStepRechazo(2);
+                          } else {
+                            setStepRechazo(1);
+                          }
+                          setMotivoRechazo('');
+                          setShowConfirmarRechazoModal(true);
+                        }}
+                      >
+                        <Ionicons name="close-circle" size={20} color="white" />
+                        <Text style={[styles.actionButtonText, { fontFamily }]}>Rechazar</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+
+                  {/* Acciones para trabajo finalizado por técnico */}
+                  {cotizacionSeleccionada.estado === 'finalizado_por_tecnico' && (
+                    <View style={styles.detailActions}>
+                      <TouchableOpacity
+                        style={[styles.actionButton, { backgroundColor: '#10b981' }]}
+                        onPress={async () => {
+                          // Preparar datos del reporte para la encuesta
+                          setReporteAConfirmar({
+                            id: cotizacionSeleccionada.id,
+                            equipo_descripcion: cotizacionSeleccionada.equipo_descripcion,
+                            empleado_asignado_email: cotizacionSeleccionada.empleado_email,
+                            empleado_asignado_nombre: cotizacionSeleccionada.empleado_nombre,
+                          });
+                          setShowCotizacionDetalleModal(false);
+                          setShowConfirmarFinalizacionModal(true);
+                        }}
+                      >
+                        <Ionicons name="checkmark-circle" size={20} color="white" />
+                        <Text style={[styles.actionButtonText, { fontFamily }]}>Confirmar Finalización</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.actionButton, { backgroundColor: '#ef4444' }]}
+                        onPress={async () => {
+                          showToast('Trabajo no confirmado', 'info');
+                          setShowCotizacionDetalleModal(false);
+                        }}
+                      >
+                        <Ionicons name="close-circle" size={20} color="white" />
+                        <Text style={[styles.actionButtonText, { fontFamily }]}>Rechazar</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+
+                  {/* Botón de Descargar PDF - Disponible siempre */}
+                  <View style={[styles.detailSection, { marginTop: 20, borderTopWidth: 1, borderTopColor: '#334155', paddingTop: 20 }]}>
+                    <TouchableOpacity
+                      disabled={generandoPDF}
+                      onPress={() => {
+                        console.log('[DEBUG] Click en Descargar PDF (Cotizaciones). Estado generandoPDF:', generandoPDF);
+                        if (generandoPDF) {
+                          console.log('[DEBUG] Evitando clic duplicado (generandoPDF === true)');
+                          return;
+                        }
+                        generarPDF(cotizacionSeleccionada);
+                      }}
+                      style={{
+                        backgroundColor: generandoPDF ? '#9ca3af' : '#ef4444',
+                        borderRadius: 8,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        flexDirection: 'row',
+                        gap: 8,
+                        paddingVertical: 14,
+                        paddingHorizontal: 20
+                      }}
+                    >
+                      {generandoPDF ? (
+                        <ActivityIndicator size="small" color="#fff" />
+                      ) : (
+                        <Ionicons name="document-text-outline" size={20} color="#fff" />
+                      )}
+                      <Text style={[{ color: '#fff', fontSize: 14, fontWeight: '700' }, { fontFamily }]}>
+                        {generandoPDF ? 'Descargando...' : 'Descargar PDF'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </ScrollView>
+            </View>
+          </View>
+        )
+      }
+
+      {/* Modal para visualizar archivo completo */}
+      <Modal
+        visible={showArchivoModal && !!archivoVisualizando}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => {
+          setShowArchivoModal(false);
+          setArchivoVisualizando(null);
+        }}
+      >
+        <View style={[styles.modalOverlay, isMobile && styles.modalOverlayMobile]}>
+          <View style={[styles.archivoModalContent, { flex: 1, flexDirection: 'column', justifyContent: 'center' }]}>
+            <TouchableOpacity
+              style={[styles.archivoModalClose, isMobile && styles.archivoModalCloseMobile]}
+              onPress={() => {
+                setShowArchivoModal(false);
+                setArchivoVisualizando(null);
+              }}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="close" size={isMobile ? 24 : 32} color="#ffffff" />
+            </TouchableOpacity>
+
+            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', width: '100%', height: '100%' }}>
+              {archivoVisualizando?.tipo_archivo === 'imagen' ||
+                archivoVisualizando?.tipo_archivo === 'foto' ||
+                archivoVisualizando?.tipo_archivo === 'foto_revision' ||
+                archivoVisualizando?.tipo_archivo?.startsWith('image/') ||
+                archivoVisualizando?.tipo === 'imagen' ||
+                archivoVisualizando?.tipo === 'foto' ||
+                archivoVisualizando?.tipo === 'foto_revision' ||
+                archivoVisualizando?.tipo?.startsWith('image/') ? (
+                <Image
+                  source={{ uri: archivoVisualizando?.url || archivoVisualizando?.uri }}
+                  style={{ width: '100%', height: '100%', resizeMode: 'contain' }}
+                  resizeMode="contain"
+                />
+              ) : archivoVisualizando?.tipo_archivo === 'video' ||
+                archivoVisualizando?.tipo_archivo?.startsWith('video/') ||
+                archivoVisualizando?.tipo === 'video' ||
+                archivoVisualizando?.tipo?.startsWith('video/') ? (
+                <TouchableOpacity
+                  onPress={() => {
+                    setShowArchivoModal(false);
+                    setArchivoVisualizando(null);
+                    const videoUrl = archivoVisualizando?.url || archivoVisualizando?.uri;
+                    openMediaExternally(videoUrl);
+                  }}
+                  activeOpacity={0.8}
+                  style={{ alignItems: 'center', gap: 12 }}
+                >
+                  <Ionicons name="play-circle" size={72} color="#60a5fa" />
+                  <Text style={{ color: '#e2e8f0', fontFamily, fontSize: 16 }}>
+                    Abrir video
+                  </Text>
+                </TouchableOpacity>
+              ) : (
+                <View style={{ alignItems: 'center' }}>
+                  <Ionicons name="document" size={80} color="#94a3b8" />
+                  <Text style={{ color: '#fff', marginTop: 20, fontFamily, fontSize: 16 }}>
+                    Este archivo no se puede previsualizar
+                  </Text>
+                </View>
+              )}
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+
+      {/* Modal Logout */}
+      {
+        showLogout && (
+          <View style={styles.logoutOverlay}>
+            <View style={styles.logoutContainer}>
+              <View style={styles.logoutHeader}>
+                <View style={styles.logoutIcon}>
+                  <Ionicons name="alert-circle-outline" size={22} color="#f87171" />
+                </View>
+                <Text style={[styles.logoutTitle, { fontFamily }]}>Cerrar sesión</Text>
+              </View>
+              <Text style={[styles.logoutMessage, { fontFamily }]}>¿Seguro que deseas salir?</Text>
+              <View style={styles.logoutButtons}>
+                <TouchableOpacity style={styles.logoutCancelButton} onPress={() => setShowLogout(false)}>
+                  <Text style={[styles.logoutCancelText, { fontFamily }]}>Cancelar</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.logoutConfirmButton} onPress={confirmLogout}>
+                  <Text style={[styles.logoutConfirmText, { fontFamily }]}>Cerrar sesión</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        )
+      }
+
+      {/* Toast Personalizado */}
+      {
+        toastMessage && (
+          <View
+            style={{
+              position: 'absolute',
+              bottom: 20,
+              left: 16,
+              right: 16,
+              borderRadius: 12,
+              overflow: 'hidden',
+              zIndex: 9999,
+            }}
+          >
+            <LinearGradient
+              colors={
+                toastType === 'success'
+                  ? ['#10b981', '#059669']
+                  : toastType === 'error'
+                    ? ['#ef4444', '#dc2626']
+                    : toastType === 'warning'
+                      ? ['#f59e0b', '#d97706']
+                      : ['#06b6d4', '#0891b2']
+              }
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                paddingHorizontal: 16,
+                paddingVertical: 14,
+                gap: 12,
+              }}
+            >
+              <Ionicons
+                name={
+                  toastType === 'success'
+                    ? 'checkmark-circle'
+                    : toastType === 'error'
+                      ? 'alert-circle'
+                      : toastType === 'warning'
+                        ? 'warning'
+                        : 'information-circle'
+                }
+                size={24}
+                color="white"
+              />
+              <Text
+                style={{
+                  color: 'white',
+                  fontWeight: '600',
+                  fontSize: 14,
+                  flex: 1,
+                  fontFamily,
+                }}
+              >
+                {toastMessage}
+              </Text>
+            </LinearGradient>
+          </View>
+        )
+      }
+      {/* Modal de Confirmación de Rechazo (Custom) */}
+      {showConfirmarRechazoModal && (
+        <View style={[styles.modalOverlay, { zIndex: 9999 }]}>
+          <View style={[
+            styles.modalContainer,
+            {
+              width: isMobile ? '90%' : '400px',
+              maxHeight: 'auto',
+              backgroundColor: '#0f172a',
+              borderWidth: 1,
+              borderColor: '#334155',
+              padding: 0,
+              overflow: 'hidden'
+            }
+          ]}>
+            <LinearGradient
+              colors={['#1e293b', '#0f172a']}
+              style={{ width: '100%', padding: 24 }}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 16, gap: 12 }}>
+                <View style={{ backgroundColor: 'rgba(239, 68, 68, 0.2)', padding: 10, borderRadius: 12 }}>
+                  <Ionicons name="alert-circle" size={28} color="#ef4444" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.modalTitle, { fontFamily, fontSize: 18 }]}>Cancelar Reporte</Text>
+                </View>
+              </View>
+
+              {reporteARechazar?.estado === 'cotizacionnueva' || reporteARechazar?.estado === 'revision pendiente cotizacion(nueva)' ? (
+                <Text style={{ fontFamily, color: '#94a3b8', fontSize: 15, lineHeight: 22, marginBottom: 24 }}>
+                  Al cancelar, el reporte quedará en estado cancelado y ya no aparecerá en seguimiento. Esta acción no se puede deshacer.
+                </Text>
+              ) : stepRechazo === 1 && reporteARechazar?.estado !== 'revision pendiente cotizacion' ? (
+                <Text style={{ fontFamily, color: '#94a3b8', fontSize: 15, lineHeight: 22, marginBottom: 24 }}>
+                  ¿Estás seguro de que deseas cancelar este reporte? Esta acción no se puede deshacer y el reporte se eliminará de su seguimiento.
+                </Text>
+              ) : (
+                <View style={{ marginBottom: 24 }}>
+                  <Text style={{ fontFamily, color: '#94a3b8', fontSize: 14, marginBottom: 12 }}>
+                    Por favor, indícanos el motivo del rechazo:
+                  </Text>
+                  <TextInput
+                    style={{
+                      backgroundColor: 'rgba(15, 23, 42, 0.4)',
+                      borderWidth: 1,
+                      borderColor: '#334155',
+                      borderRadius: 10,
+                      padding: 14,
+                      color: '#f8fafc',
+                      fontFamily,
+                      fontSize: 14,
+                      minHeight: 100,
+                      textAlignVertical: 'top'
+                    }}
+                    placeholder="Escribe aquí el motivo..."
+                    placeholderTextColor="#64748b"
+                    multiline
+                    value={motivoRechazo}
+                    onChangeText={setMotivoRechazo}
+                    autoFocus
+                  />
+                </View>
+              )}
+
+              <View style={{ flexDirection: 'row', gap: 12 }}>
+                <TouchableOpacity
+                  style={{
+                    flex: 1,
+                    paddingVertical: 12,
+                    borderRadius: 8,
+                    borderWidth: 1,
+                    borderColor: '#334155',
+                    backgroundColor: 'transparent',
+                    alignItems: 'center',
+                  }}
+                  onPress={() => {
+                    setShowConfirmarRechazoModal(false);
+                    setReporteARechazar(null);
+                    setMotivoRechazo('');
+                    setStepRechazo(1);
+                  }}
+                >
+                  <Text style={{ fontFamily, color: '#e2e8f0', fontWeight: '600' }}>Cancelar</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={{
+                    flex: 1,
+                    paddingVertical: 12,
+                    borderRadius: 8,
+                    backgroundColor: '#ef4444',
+                    alignItems: 'center',
+                    shadowColor: '#ef4444',
+                    shadowOffset: { width: 0, height: 4 },
+                    shadowOpacity: 0.3,
+                    shadowRadius: 8,
+                    elevation: 4
+                  }}
+                  onPress={async () => {
+                    if (!reporteARechazar) return;
+                    const esSegundaCotizacion = reporteARechazar.estado === 'cotizacionnueva' || reporteARechazar.estado === 'revision pendiente cotizacion(nueva)';
+                    const esExpress = reporteARechazar.estado === 'revision pendiente cotizacion';
+
+                    if (stepRechazo === 1 && !esSegundaCotizacion && !esExpress) {
+                      setStepRechazo(2);
+                      return;
+                    }
+
+                    if (!esSegundaCotizacion && !motivoRechazo.trim()) {
+                      showToast('Por favor ingresa un motivo', 'warning');
+                      return;
+                    }
+
+                    setRechazandoReporte(true);
+                    try {
+                      logDebug('[CLIENTE] Cancelando reporte (rechazando cotización), cambiando a rechazado/cancelado');
+                      let estadoRechazo = 'rechazado';
+                      let motivoCan = motivoRechazo.trim();
+
+                      if (esSegundaCotizacion) {
+                        estadoRechazo = 'cancelado';
+                        motivoCan = 'Rechazo de cotizacion nueva';
+                      }
+
+                      const payload: any = {
+                        estado: estadoRechazo,
+                        precio_cotizacion: 0
+                      };
+                      if (motivoCan) {
+                        payload.motivo_cancelacion = motivoCan;
+                      }
+                      const resultado = await actualizarReporteBackend(reporteARechazar.id, payload);
+
+                      if (!resultado.success) {
+                        showToast(resultado.error || 'Error al rechazar', 'error');
+                        setRechazandoReporte(false);
+                        return;
+                      }
+
+                      showToast('Reporte cancelado exitosamente', 'success');
+                      setShowConfirmarRechazoModal(false);
+                      setReporteARechazar(null);
+                      setMotivoRechazo('');
+                      setStepRechazo(1);
+
+                      // Recargar datos
+                      cargarReportes(usuario?.email);
+                      cargarCotizaciones(usuario?.email);
+                      if (esSegundaCotizacion || esExpress) {
+                        setCanceladosLocal((prev) => {
+                          const next = new Set(prev);
+                          next.add(Number(reporteARechazar.id));
+                          AsyncStorage.setItem('reportes_cancelados_local', JSON.stringify(Array.from(next)));
+                          return next;
+                        });
+                        setCotizaciones((prev) => prev.filter((c) => c.id !== reporteARechazar.id));
+                        setReportesFinalizados((prev) => [
+                          { ...reporteARechazar, estado: estadoRechazo, esCancelado: true },
+                          ...prev.filter((r) => r.id !== reporteARechazar.id)
+                        ]);
+                      }
+                      setShowCotizacionDetalleModal(false);
+                    } catch (error) {
+                      console.error('[CLIENTE] Error al rechazar:', error);
+                      showToast('Error inesperado al rechazar', 'error');
+                    } finally {
+                      setRechazandoReporte(false);
+                    }
+                  }}
+                  disabled={rechazandoReporte}
+                >
+                  <Text style={{ fontFamily, color: '#e2e8f0', fontWeight: '600' }}>
+                    {rechazandoReporte
+                      ? 'Procesando...'
+                      : ((reporteARechazar?.estado === 'cotizacionnueva' || reporteARechazar?.estado === 'revision pendiente cotizacion' || reporteARechazar?.estado === 'revision pendiente cotizacion(nueva)')
+                        ? 'Sí, cancelar'
+                        : (stepRechazo === 1 ? 'Sí, continuar' : 'Confirmar Cancelación'))}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </LinearGradient>
+          </View>
+        </View>
+      )}
+
+      {/* Modal de Éxito al Responder Encuesta */}
+      <Modal
+        visible={showEncuestaSuccessModal}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowEncuestaSuccessModal(false)}
+      >
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center', padding: 20 }}>
+          <View style={{ backgroundColor: '#1e293b', borderRadius: 16, padding: 24, width: '100%', maxWidth: 400, alignItems: 'center', borderWidth: 1, borderColor: '#334155' }}>
+            <View style={{ width: 64, height: 64, borderRadius: 32, backgroundColor: 'rgba(16, 185, 129, 0.1)', alignItems: 'center', justifyContent: 'center', marginBottom: 16 }}>
+              <Ionicons name="checkmark-circle" size={40} color="#10b981" />
+            </View>
+
+            <Text style={{ fontSize: 20, fontWeight: 'bold', color: 'white', marginBottom: 8, textAlign: 'center', fontFamily }}>
+              ¡Gracias por tu tiempo!
+            </Text>
+
+            <Text style={{ fontSize: 15, color: '#94a3b8', textAlign: 'center', marginBottom: 24, lineHeight: 22, fontFamily }}>
+              Tu opinión es muy valiosa para nosotros. El reporte ha sido cerrado exitosamente.
+            </Text>
+
+            <TouchableOpacity
+              activeOpacity={0.8}
+              onPress={() => {
+                setShowEncuestaSuccessModal(false);
+                // Limpiar parámetros al cerrar
+                if (Platform.OS !== 'web') {
+                  router.replace('/cliente-panel');
+                } else {
+                  window.history.replaceState({}, '', '/cliente-panel');
+                }
+              }}
+              style={{ backgroundColor: '#3b82f6', paddingVertical: 12, paddingHorizontal: 24, borderRadius: 8, width: '100%', alignItems: 'center' }}
+            >
+              <Text style={{ color: 'white', fontWeight: '600', fontSize: 16, fontFamily }}>
+                Entendido
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+    </SafeAreaView >
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#0f172a',
+  },
+  scrollView: {
+    flex: 1,
+  },
+  content: {
+    flex: 1,
+    paddingHorizontal: 32,
+    paddingVertical: 24,
+    maxWidth: 1152,
+    alignSelf: 'center',
+    width: '100%',
+  },
+  contentMobile: {
+    flex: 1,
+    paddingHorizontal: 16,
+    paddingVertical: 20,
+  },
+  header: {
+    marginBottom: 32,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  headerMobile: {
+    marginBottom: 24,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  headerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+    flex: 1,
+  },
+  avatarContainer: {
+    position: 'relative',
+  },
+  avatar: {
+    width: 56,
+    height: 56,
+    borderRadius: 16,
+    backgroundColor: '#0891b2',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarText: {
+    color: 'white',
+    fontWeight: 'bold',
+    fontSize: 20,
+    letterSpacing: 1,
+  },
+  statusDot: {
+    position: 'absolute',
+    bottom: -4,
+    right: -4,
+    width: 16,
+    height: 16,
+    backgroundColor: '#10b981',
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: '#020617',
+  },
+  headerInfo: {
+    flex: 1,
+  },
+  welcomeText: {
+    color: 'white',
+    fontWeight: 'bold',
+    fontSize: 20,
+  },
+  empresaText: {
+    color: '#22d3ee',
+    fontWeight: '600',
+    fontSize: 14,
+  },
+  roleText: {
+    color: '#64748b',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'center',
+  },
+  toggleButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    backgroundColor: '#1e293bcc',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  logoutButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    backgroundColor: '#1e293bcc',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  statsRow: {
+    marginBottom: 32,
+    flexDirection: 'row',
+    gap: 16,
+  },
+  statsRowMobile: {
+    marginBottom: 24,
+    gap: 12,
+  },
+  statCard: {
+    flex: 1,
+    backgroundColor: '#1e293b66',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#33415580',
+    padding: 20,
+  },
+  statCardMobile: {
+    backgroundColor: '#1e293b66',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#33415580',
+    padding: 20,
+    marginBottom: 12,
+  },
+  statCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  statIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  statBadge: {
+    backgroundColor: '#33415580',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  statBadgeText: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  statValue: {
+    color: 'white',
+    fontWeight: '900',
+    fontSize: 30,
+    marginBottom: 4,
+  },
+  statLabel: {
+    color: '#94a3b8',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  sectionHeader: {
+    marginBottom: 20,
+  },
+  sectionTitle: {
+    color: '#06b6d4',
+    fontWeight: '700',
+    fontSize: 14,
+    marginBottom: 12,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  sectionSubtitle: {
+    color: '#94a3b8',
+    fontSize: 14,
+  },
+  filterToggleButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: '#0b1626',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+  },
+  filtroPanel: {
+    backgroundColor: 'rgba(15, 23, 42, 0.8)',
+    borderWidth: 1,
+    borderColor: 'rgba(51, 65, 85, 0.5)',
+    borderRadius: 14,
+    padding: 18,
+    marginBottom: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 10,
+    elevation: 3,
+  },
+  filtroPanelHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  filtroTitulo: {
+    color: '#06b6d4',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  filtroSection: {
+    gap: 8,
+    marginBottom: 20,
+  },
+  filtroLabel: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
+  filtroChips: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  filtroChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#132137',
+    borderRadius: 20,
+    borderWidth: 2,
+    borderColor: '#1f2b3d',
+  },
+  filtroChipActive: {
+    backgroundColor: 'rgba(6, 182, 212, 0.12)',
+    borderWidth: 2,
+  },
+  filtroChipText: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  filtroChipTextActive: {
+    fontWeight: '700',
+  },
+  limpiarFiltrosButtonSmall: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: '#ef44441a',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#ef44444d',
+  },
+  limpiarFiltrosTextSmall: {
+    color: '#f87171',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  filtroResumen: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 2,
+  },
+  filtroResumenText: {
+    color: '#94a3b8',
+    fontSize: 12,
+  },
+  optionsGrid: {
+    marginBottom: 24,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 16,
+  },
+  optionsGridMobile: {
+    marginBottom: 24,
+    gap: 12,
+  },
+  optionCard: {
+    width: 'calc(50% - 8px)',
+    borderRadius: 16,
+    padding: 24,
+    borderWidth: 2,
+    borderColor: '#ffffff1a',
+  },
+  optionCardMobile: {
+    borderRadius: 16,
+    padding: 24,
+    borderWidth: 2,
+    borderColor: '#ffffff1a',
+    marginBottom: 12,
+  },
+  optionContent: {
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  optionContentMobile: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+  },
+  optionIcon: {
+    width: 56,
+    height: 56,
+    backgroundColor: '#ffffff33',
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  optionTextContainer: {
+    flex: 1,
+  },
+  optionTitle: {
+    color: 'white',
+    fontWeight: '900',
+    fontSize: 18,
+    marginBottom: 4,
+  },
+  optionDescription: {
+    color: '#ffffffcc',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  modalOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#000000b3',
+    zIndex: 50,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalContainer: {
+    width: '100%',
+    maxWidth: 768,
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 16,
+    padding: 20,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginBottom: 12,
+  },
+  modalHeaderMobile: {
+    alignItems: 'flex-start',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  modalHeaderText: {
+    flex: 1,
+  },
+  modalTitle: {
+    color: 'white',
+    fontWeight: '900',
+    fontSize: 20,
+  },
+  modalTitleMobile: {
+    fontSize: 18,
+    lineHeight: 22,
+  },
+  modalSubtitle: {
+    color: '#94a3b8',
+    fontSize: 14,
+  },
+  modalSubtitleMobile: {
+    fontSize: 13,
+  },
+  modalHeaderButtons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  modalHeaderButtonsMobile: {
+    width: '100%',
+    justifyContent: 'flex-start',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  refreshButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#1e293b',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 8,
+  },
+  refreshButtonDisabled: {
+    opacity: 0.7,
+  },
+  refreshButtonText: {
+    color: '#67e8f9',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  closeButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: '#1e293b',
+    borderWidth: 1,
+    borderColor: '#334155',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  infoBox: {
+    backgroundColor: '#1e293b66',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 12,
+  },
+  infoText: {
+    color: '#cbd5e1',
+    fontSize: 12,
+  },
+  reportCard: {
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+  },
+  reportCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginBottom: 8,
+  },
+  reportCardInfo: {
+    flex: 1,
+  },
+  reportCardTitle: {
+    color: 'white',
+    fontWeight: '600',
+    fontSize: 16,
+  },
+  reportCardDate: {
+    color: '#64748b',
+    fontSize: 12,
+  },
+  reportCardActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  badge: {
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 16,
+    borderWidth: 1,
+  },
+  badgeText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  eyeButton: {
+    width: 32,
+    height: 32,
+    backgroundColor: '#1e293b',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  reportCardComment: {
+    color: '#cbd5e1',
+    fontSize: 14,
+    marginBottom: 8,
+  },
+  reportCardFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
+    marginTop: 4,
+  },
+  loadingText: {
+    color: '#94a3b8',
+    fontSize: 14,
+  },
+  errorBox: {
+    backgroundColor: '#ef44441a',
+    borderWidth: 1,
+    borderColor: '#ef44444d',
+    borderRadius: 12,
+    padding: 16,
+  },
+  errorText: {
+    color: '#fca5a5',
+    fontSize: 14,
+  },
+  emptyContainer: {
+    gap: 12,
+  },
+  emptyText: {
+    color: '#94a3b8',
+    fontSize: 14,
+  },
+  demoBox: {
+    backgroundColor: '#0f172acc',
+    borderWidth: 1,
+    borderColor: '#10b9814d',
+    borderRadius: 12,
+    padding: 16,
+  },
+  demoTitle: {
+    color: '#6ee7b7',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 8,
+  },
+  reportsList: {
+    maxHeight: 420,
+  },
+  reportsContainer: {
+    gap: 12,
+  },
+  detailOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#000000b3',
+    zIndex: 60,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  detailContainer: {
+    width: '100%',
+    maxWidth: 672,
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 16,
+    padding: 20,
+  },
+  detailHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginBottom: 16,
+  },
+  detailHeaderText: {
+    flex: 1,
+  },
+  detailTitle: {
+    color: 'white',
+    fontWeight: '900',
+    fontSize: 18,
+  },
+  detailScroll: {
+    maxHeight: 500,
+  },
+  detailField: {
+    backgroundColor: '#1e293b80',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+  },
+  detailLabel: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 8,
+  },
+  detailValue: {
+    color: 'white',
+    fontSize: 14,
+    flexWrap: 'wrap',
+    flexShrink: 1,
+  },
+  detailFieldSubtext: {
+    color: '#94a3b8',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  detailRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  detailFooter: {
+    flexDirection: 'row',
+    gap: 12,
+    paddingTop: 16,
+  },
+  detailCloseButton: {
+    flex: 1,
+    backgroundColor: '#475569',
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#475569',
+  },
+  detailCloseButtonText: {
+    color: 'white',
+    fontWeight: '600',
+  },
+  detailConfirmButton: {
+    flex: 1,
+    backgroundColor: '#10b981',
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#34d399',
+  },
+  detailConfirmButtonText: {
+    color: 'white',
+    fontWeight: '700',
+    fontSize: 15,
+  },
+  detailSeparator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  separatorLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: '#334155',
+  },
+  separatorText: {
+    color: '#f59e0b',
+    fontSize: 13,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  successOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#00000099',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    zIndex: 20,
+  },
+  successContainer: {
+    width: '100%',
+    maxWidth: 448,
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#22d3ee66',
+    borderRadius: 16,
+    padding: 20,
+  },
+  successHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 12,
+  },
+  successIcon: {
+    backgroundColor: '#22d3ee26',
+    borderRadius: 20,
+    padding: 10,
+  },
+  successTitle: {
+    color: 'white',
+    fontWeight: 'bold',
+    fontSize: 18,
+  },
+  successMessage: {
+    color: '#e2e8f0',
+    fontSize: 14,
+    marginBottom: 16,
+  },
+  successButton: {
+    backgroundColor: '#06b6d4',
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#22d3ee80',
+  },
+  successButtonText: {
+    color: 'white',
+    fontWeight: '600',
+  },
+  logoutOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#000000b3',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+    zIndex: 10,
+  },
+  logoutContainer: {
+    width: '100%',
+    maxWidth: 384,
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 16,
+    padding: 24,
+  },
+  logoutHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 16,
+  },
+  logoutIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: '#ef444433',
+    borderWidth: 1,
+    borderColor: '#f8717180',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  logoutTitle: {
+    color: 'white',
+    fontWeight: 'bold',
+    fontSize: 18,
+  },
+  logoutMessage: {
+    color: '#cbd5e1',
+    fontSize: 14,
+    marginBottom: 24,
+  },
+  logoutButtons: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  logoutCancelButton: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+    backgroundColor: '#1e293b',
+  },
+  logoutCancelText: {
+    color: '#e2e8f0',
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  logoutConfirmButton: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 12,
+    backgroundColor: '#ef4444',
+    borderWidth: 1,
+    borderColor: '#f87171',
+  },
+  logoutConfirmText: {
+    color: 'white',
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  largeModal: {
+    backgroundColor: '#0f172a',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#334155',
+    maxHeight: '85%',
+    maxWidth: '95%',
+    width: '100%',
+    overflow: 'hidden',
+  },
+  largeModalHeader: {
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1e293b',
+    backgroundColor: 'rgba(15, 23, 42, 0.8)',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  largeModalTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  largeModalSubtitle: {
+    color: '#94a3b8',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  listScroll: {
+    flex: 1,
+  },
+  listSpacing: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    gap: 12,
+  },
+  reportHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  reportHeaderText: {
+    flex: 1,
+  },
+  reportTitle: {
+    color: '#f1f5f9',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  reportSubtitle: {
+    color: '#94a3b8',
+    fontSize: 13,
+    marginTop: 2,
+  },
+  reportMeta: {
+    color: '#64748b',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  estadoBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  estadoText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  detailContent: {
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    gap: 20,
+  },
+  detailSection: {
+    gap: 12,
+    backgroundColor: 'rgba(30, 41, 59, 0.6)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+  },
+  detailSectionTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#06b6d4',
+    marginBottom: 12,
+  },
+  detailActions: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 20,
+  },
+  actionButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 10,
+    gap: 8,
+  },
+  actionButtonText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: 'white',
+  },
+  overlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#000000b3',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+    zIndex: 10,
+  },
+  footer: {
+    flexDirection: 'row',
+    gap: 12,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#1e293b',
+  },
+  cancelButton: {
+    flex: 1,
+    backgroundColor: '#475569',
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#475569',
+  },
+  cancelButtonText: {
+    color: 'white',
+    fontWeight: '600',
+  },
+  submitButton: {
+    flex: 1,
+    backgroundColor: '#10b981',
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#34d399',
+  },
+  archivosContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    width: '100%',
+    marginBottom: 8,
+  },
+  archivoItem: {
+    width: '47%',
+    backgroundColor: '#161f2e',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    padding: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  archivoThumb: {
+    width: '100%',
+    height: 140,
+    borderRadius: 10,
+    marginBottom: 4,
+  },
+  videoThumb: {
+    width: '100%',
+    height: 140,
+    borderRadius: 10,
+    marginBottom: 4,
+    backgroundColor: '#0f172a',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+  },
+  archivoLabel: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  archivoModalContent: {
+    backgroundColor: 'rgba(15, 23, 42, 0.95)',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#334155',
+    padding: 20,
+    maxWidth: '95%',
+    maxHeight: '95%',
+    width: '90%',
+    height: '90%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+    flexDirection: 'column',
+  },
+  archivoModalContentMobile: {
+    width: '100%',
+    height: '100%',
+    maxWidth: '100%',
+    maxHeight: '100%',
+    borderRadius: 0,
+    borderWidth: 0,
+    padding: 0,
+  },
+  archivoModalClose: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    zIndex: 10,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    borderRadius: 50,
+    width: 48,
+    height: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  archivoModalCloseMobile: {
+    width: 40,
+    height: 40,
+  },
+  statusBadgePending: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    backgroundColor: 'rgba(245, 158, 11, 0.1)',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.3)',
+    alignSelf: 'flex-start',
+  },
+  statusBadgeTextPending: {
+    color: '#f59e0b',
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  archivoModalName: {
+    color: '#f1f5f9',
+    fontSize: 14,
+    fontWeight: '600',
+    marginTop: 12,
+  },
+  archivoModalNameMobile: {
+    fontSize: 12,
+  },
+  modalOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalOverlayMobile: {
+    padding: 12,
+  },
+  // ─── Pro Filter Input Styles ─────────────────────────────
+  searchFilterContainerPro: {
+    marginHorizontal: 16,
+    marginBottom: 8,
+    gap: 6,
+  },
+  searchFilterLabelPro: {
+    paddingHorizontal: 4,
+  },
+  searchFilterLabelText: {
+    color: '#64748b',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+  },
+  searchFilterInputWrapperPro: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.6)',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    height: 48,
+    borderWidth: 1,
+    borderColor: 'rgba(51, 65, 85, 0.8)',
+    overflow: 'hidden',
+  },
+  searchFilterInputWrapperFocused: {
+    borderColor: 'rgba(6, 182, 212, 0.5)',
+    backgroundColor: 'rgba(6, 182, 212, 0.05)',
+  },
+  searchInputPro: {
+    flex: 1,
+    color: '#f1f5f9',
+    fontSize: 14,
+  },
+  searchFilterContainerMobile: {
+    marginHorizontal: 12,
+    marginBottom: 6,
+  },
+  filtrosResultados: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingBottom: 10,
+  },
+  filtrosResultadosText: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+});
+
+// Estilo especial para el overlay del modal de archivo (debe estar por encima)
+const archivoOverlayStyle = {
+  position: 'absolute' as const,
+  top: 0,
+  left: 0,
+  right: 0,
+  bottom: 0,
+  backgroundColor: '#000000b3',
+  zIndex: 50, // Mayor que detailOverlay (40)
+  paddingHorizontal: 16,
+  alignItems: 'center' as const,
+  justifyContent: 'center' as const,
+};
+
+export default function ClientePanel() {
+  const router = useRouter();
+  const [authorized, setAuthorized] = useState(false);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    const verificarAcceso = async () => {
+      try {
+        const user = await AsyncStorage.getItem('user');
+        if (!user) {
+          router.replace('/');
+          return;
+        }
+        const parsedUser = JSON.parse(user);
+        if (parsedUser.rol !== 'cliente') {
+          logWarn(`[SEGURIDAD] Usuario ${parsedUser.email} con rol ${parsedUser.rol} intentó acceder a /cliente-panel`);
+          switch (parsedUser.rol) {
+            case 'admin':
+              router.replace('/admin');
+              break;
+            case 'empleado':
+              router.replace('/empleado-panel');
+              break;
+            default:
+              router.replace('/');
+          }
+          return;
+        }
+        setAuthorized(true);
+      } catch (error) {
+        router.replace('/');
+      } finally {
+        setChecking(false);
+      }
+    };
+    verificarAcceso();
+  }, [router]);
+
+  if (checking) {
+    return (
+      <SafeAreaView style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0f172a' }}>
+        <ActivityIndicator size="large" color="#3b82f6" />
+      </SafeAreaView>
+    );
+  }
+
+  if (!authorized) {
+    return null;
+  }
+
+  return <ClientePanelContent />;
+}

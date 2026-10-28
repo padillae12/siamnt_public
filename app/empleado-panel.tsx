@@ -1,0 +1,7283 @@
+// @ts-nocheck
+import CustomDatePicker from '@/components/CustomDatePicker';
+import UploadProgressOverlay from '@/components/UploadProgressOverlay';
+import { PDF_TEMPLATE_BASE64 } from '@/constants/pdf-templates';
+import {
+  actualizarEstadoReporteAsignado,
+  actualizarEstadoTareaBackend,
+  apiCall,
+  obtenerArchivosReporteBackend,
+  obtenerInventarioEmpleadoBackend,
+  obtenerReportesAsignados,
+  obtenerTareasEmpleadoBackend,
+  rechazarAsignacionBackend
+} from '@/lib/api-backend';
+import { getProxyUrl } from '@/lib/cloudflare';
+import { matchesSearchDate } from '@/lib/date-utils';
+import { obtenerSucursalesPorEmpresa } from '@/lib/empresas';
+import { obtenerColorEstado, obtenerNombreEstado } from '@/lib/estado-mapeo';
+import { subirArchivosEmpleadoConProgreso } from '@/lib/reportes';
+import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFocusEffect } from '@react-navigation/native';
+import { Audio } from 'expo-av';
+import * as FileSystem from 'expo-file-system';
+import * as ImagePicker from 'expo-image-picker';
+import { LinearGradient } from 'expo-linear-gradient';
+import * as Print from 'expo-print';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import * as Sharing from 'expo-sharing';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  Image,
+  Linking,
+  Modal,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  useWindowDimensions,
+  View
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+
+type Empleado = {
+  nombre?: string;
+  email?: string;
+  rol?: string;
+};
+
+function EmpleadoPanelContent() {
+  const router = useRouter();
+
+  const { width } = useWindowDimensions();
+  const isMobile = width < 768;
+  const fontFamily = Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif';
+  const [usuario, setUsuario] = useState<Empleado | null>(null);
+  const [tareas, setTareas] = useState(0);
+  const [reportes, setReportes] = useState(0);
+  const [herramientas, setHerramientas] = useState(0);
+  const [reportesTerminados, setReportesTerminados] = useState(0);
+  const [tareasTerminadas, setTareasTerminadas] = useState(0);
+  const [showLogout, setShowLogout] = useState(false);
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [passwordForm, setPasswordForm] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: ''
+  });
+
+  // --- Estados para el nuevo Loading Overlay Premium ---
+  const [showUploadProgress, setShowUploadProgress] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState({ uploaded: 0, total: 0, phase: '', percent: 0 });
+  const [uploadSteps, setUploadSteps] = useState([
+    { label: 'Preparando...', icon: 'construct-outline', done: false },
+    { label: 'Subiendo Audio...', icon: 'mic-outline', done: false },
+    { label: 'Subiendo Fotos Revisión...', icon: 'images-outline', done: false },
+    { label: 'Subiendo Fotos Postproceso...', icon: 'camera-outline', done: false },
+    { label: 'Finalizando Reporte...', icon: 'cloud-upload-outline', done: false },
+  ]);
+
+  const [currentUploadStep, setCurrentUploadStep] = useState(0);
+  const [estimatedTimeLeft, setEstimatedTimeLeft] = useState('');
+
+  const [passwordErrors, setPasswordErrors] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: '',
+    general: ''
+  });
+  const [loadingPassword, setLoadingPassword] = useState(false);
+  const [showStats, setShowStats] = useState(true);
+  const [showTareasModal, setShowTareasModal] = useState(false);
+  const [listaTareas, setListaTareas] = useState<any[]>([]);
+  const [loadingTareas, setLoadingTareas] = useState(false);
+  const [showTareaDetalle, setShowTareaDetalle] = useState(false);
+  const [tareaSeleccionada, setTareaSeleccionada] = useState<any>(null);
+  const [actualizandoTarea, setActualizandoTarea] = useState(false);
+  const [showHistorialTareasModal, setShowHistorialTareasModal] = useState(false);
+  const [listaTareasTerminadas, setListaTareasTerminadas] = useState<any[]>([]);
+  const [loadingHistorialTareas, setLoadingHistorialTareas] = useState(false);
+  const [showReportesModal, setShowReportesModal] = useState(false);
+  const [listaReportes, setListaReportes] = useState<any[]>([]);
+  const [loadingReportes, setLoadingReportes] = useState(false);
+  const [showReporteDetalle, setShowReporteDetalle] = useState(false);
+  const openMediaExternally = (url: string) => {
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      const opened = window.open(url, '_blank', 'noopener,noreferrer');
+      if (!opened) {
+        window.location.assign(url);
+      }
+      return;
+    }
+    Linking.openURL(url);
+  };
+  const [reporteSeleccionado, setReporteSeleccionado] = useState<any>(null);
+  const [sucursalImagenUrl, setSucursalImagenUrl] = useState<string | undefined>(undefined);
+  const [actualizandoReporte, setActualizandoReporte] = useState(false);
+  const [showHistorialReportesModal, setShowHistorialReportesModal] = useState(false);
+  const [listaReportesTerminados, setListaReportesTerminados] = useState<any[]>([]);
+  const [loadingHistorialReportes, setLoadingHistorialReportes] = useState(false);
+  const [generandoPDF, setGenerandoPDF] = useState<string | null>(null);
+  const [generandoPDFBorrador, setGenerandoPDFBorrador] = useState(false);
+  const [mostrarFiltrosTerminados, setMostrarFiltrosTerminados] = useState(false);
+  const [showInventarioModal, setShowInventarioModal] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  // Advanced filters for Mis Reportes
+  const [filtrosEstado, setFiltrosEstado] = useState<string[]>([]);
+  const [filtrosPrioridad, setFiltrosPrioridad] = useState<string[]>([]);
+  const [filtroID, setFiltroID] = useState('');
+  const [filtroFecha, setFiltroFecha] = useState('');
+  const [filtroCliente, setFiltroCliente] = useState('');
+  const [mostrarFiltros, setMostrarFiltros] = useState(true);
+  const [listaHerramientas, setListaHerramientas] = useState<any[]>([]);
+  const [loadingHerramientas, setLoadingHerramientas] = useState(false);
+  const [showHerramientaDetalle, setShowHerramientaDetalle] = useState(false);
+  const [herramientaSeleccionada, setHerramientaSeleccionada] = useState<any>(null);
+  const [archivosReporte, setArchivosReporte] = useState<any[]>([]);
+  const [cargandoArchivos, setCargandoArchivos] = useState(false);
+  const [showArchivoModal, setShowArchivoModal] = useState(false);
+  const [archivoVisualizando, setArchivoVisualizando] = useState<any | null>(null);
+  const [showCotizarModal, setShowCotizarModal] = useState(false);
+  const [showExpressModal, setShowExpressModal] = useState(false);
+  const [descripcionTrabajo, setDescripcionTrabajo] = useState('');
+  const [precioCotizacion, setPrecioCotizacion] = useState('');
+  const [guardandoCotizacion, setGuardandoCotizacion] = useState(false);
+
+  // Estados para Fase 2 (ejecución del trabajo)
+  const [revision, setRevision] = useState('');
+  const [recomendaciones, setRecomendaciones] = useState('');
+  const [reparacion, setReparacion] = useState('');
+  const [recomendacionesAdicionales, setRecomendacionesAdicionales] = useState('');
+  const [materialesRefacciones, setMaterialesRefacciones] = useState('');
+  const [guardandoFase2, setGuardandoFase2] = useState(false);
+  const [evidenciaReporte, setEvidenciaReporte] = useState<any[]>([]);
+  const [toastMessage, setToastMessage] = useState('');
+  const [toastType, setToastType] = useState<'success' | 'error' | 'info' | 'warning'>('info');
+  const [showConfirmarAnalisis, setShowConfirmarAnalisis] = useState(false);
+  const [showConfirmarFinalizarModal, setShowConfirmarFinalizarModal] = useState(false);
+
+  // Estados para rechazo de asignación
+  const [showRechazarModal, setShowRechazarModal] = useState(false);
+  const [reporteARechazar, setReporteARechazar] = useState<any>(null);
+  const [rechazoMotivo, setRechazoMotivo] = useState('');
+  const [rechazandoAsignacion, setRechazandoAsignacion] = useState(false);
+
+  // Estados para grabación de audio
+  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const [audioUri, setAudioUri] = useState<string | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [playbackObject, setPlaybackObject] = useState<Audio.Sound | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const [recordingInterval, setRecordingInterval] = useState<any>(null);
+
+  // Estados para IMAGENES DE ANALISIS
+  const [fotosRevisionUris, setFotosRevisionUris] = useState<string[]>([]);
+  const [fotosPostprocesoUris, setFotosPostprocesoUris] = useState<string[]>([]);
+  const nombresArchivosLocalesCache = useRef<Record<string, string>>({});
+
+
+
+
+  useEffect(() => {
+    const obtenerUsuario = async () => {
+      try {
+        const user = await AsyncStorage.getItem('user');
+        if (user) {
+          const userData = JSON.parse(user);
+          // Validación: solo empleados pueden acceder a este panel
+          if (userData.rol !== 'empleado') {
+            console.warn(`[SEGURIDAD] Usuario ${userData.email} con rol ${userData.rol} intentó acceder a /empleado-panel. Redirigiendo...`);
+            // Redirigir según su rol
+            switch (userData.rol) {
+              case 'admin':
+                router.replace('/admin');
+                break;
+              case 'cliente':
+                router.replace('/cliente-panel');
+                break;
+              default:
+                router.replace('/');
+            }
+            return;
+          }
+          setUsuario(userData);
+        } else {
+          router.replace('/');
+        }
+      } catch (error) {
+        router.replace('/');
+      }
+    };
+    obtenerUsuario();
+  }, [router]);
+
+  // Hooks de filtrado
+  const reportesFiltrados = useMemo(() => {
+    let filtrados = listaReportes;
+
+    // Filtrar por estado
+    if (filtrosEstado.length > 0) {
+      filtrados = filtrados.filter((r) => {
+        const estado = (r.estado || '').toLowerCase();
+        return filtrosEstado.some(f => {
+          if (f === 'en_espera') return estado === 'pendiente' || estado === 'en_espera' || estado === 'en espera';
+          if (f === 'asignado') return estado === 'asignado';
+          if (f === 'en_cotizacion') return estado === 'en_cotizacion' || estado === 'en cotizacion' || estado === 'cotizado' || estado === 'en_espera_confirmacion' || estado === 'en espera confirmacion';
+          if (f === 'en_ejecucion') return estado === 'en_proceso' || estado === 'en proceso' || estado === 'en_ejecucion' || estado === 'en ejecucion' || estado === 'aceptado_por_cliente' || estado === 'finalizado_por_tecnico' || estado === 'listo_para_encuesta';
+          return estado === f;
+        });
+      });
+    }
+
+    // Filtrar por prioridad
+    if (filtrosPrioridad.length > 0) {
+      filtrados = filtrados.filter((r) => {
+        const prioridad = (r.prioridad || 'media').toLowerCase();
+        return filtrosPrioridad.includes(prioridad);
+      });
+    }
+
+    // Filtrar por ID
+    if (filtroID.trim() !== '') {
+      filtrados = filtrados.filter((r) => String(r.id).toLowerCase().includes(filtroID.toLowerCase()));
+    }
+
+    // Filtrar por fecha
+    if (filtroFecha.trim() !== '') {
+      const search = filtroFecha.replace(/\//g, '-').toLowerCase();
+      filtrados = filtrados.filter((r) => {
+        return matchesSearchDate(r.fecha_reporte, search) || matchesSearchDate(r.created_at, search);
+      });
+    }
+
+    // Filtrar por cliente (nombre, email, empresa)
+    if (filtroCliente.trim() !== '') {
+      const search = filtroCliente.toLowerCase();
+      filtrados = filtrados.filter((r) => {
+        const nombre = (r.usuario_nombre || '').toLowerCase();
+        const apellido = (r.usuario_apellido || '').toLowerCase();
+        const nombreCompleto = `${nombre} ${apellido}`.trim();
+        const email = (r.usuario_email || '').toLowerCase();
+        const empresa = (r.empresa || '').toLowerCase();
+        return nombreCompleto.includes(search) || nombre.includes(search) || apellido.includes(search) || email.includes(search) || empresa.includes(search);
+      });
+    }
+
+    // Filtrar por búsqueda de equipo/servicio (searchQuery)
+    if (searchQuery.trim() !== '') {
+      const search = searchQuery.toLowerCase();
+      filtrados = filtrados.filter((r) => {
+        const equipo = (r.equipo_descripcion || '').toLowerCase();
+        const comentario = (r.comentario || '').toLowerCase();
+        const titulo = (r.titulo || '').toLowerCase();
+        const id = String(r.id).toLowerCase();
+        return equipo.includes(search) || comentario.includes(search) || titulo.includes(search) || id.includes(search);
+      });
+    }
+
+    return filtrados;
+  }, [listaReportes, filtrosEstado, filtrosPrioridad, filtroID, filtroFecha, filtroCliente, searchQuery]);
+
+  const reportesTerminadosFiltrados = useMemo(() => {
+    let filtrados = listaReportesTerminados;
+
+    // Filtrar por prioridad
+    if (filtrosPrioridad.length > 0) {
+      filtrados = filtrados.filter((r) => {
+        const prioridad = (r.prioridad || 'media').toLowerCase();
+        return filtrosPrioridad.includes(prioridad);
+      });
+    }
+
+    // Filtrar por cliente (nombre, email, empresa)
+    if (filtroCliente.trim() !== '') {
+      const search = filtroCliente.toLowerCase();
+      filtrados = filtrados.filter((r) => {
+        const nombre = (r.usuario_nombre || '').toLowerCase();
+        const apellido = (r.usuario_apellido || '').toLowerCase();
+        const nombreCompleto = `${nombre} ${apellido}`.trim();
+        const email = (r.usuario_email || '').toLowerCase();
+        const empresa = (r.empresa || '').toLowerCase();
+        return nombreCompleto.includes(search) || nombre.includes(search) || apellido.includes(search) || email.includes(search) || empresa.includes(search);
+      });
+    }
+
+    // Filtrar por ID
+    if (filtroID.trim() !== '') {
+      const search = filtroID.toLowerCase();
+      filtrados = filtrados.filter((r) => String(r.id).toLowerCase().includes(search));
+    }
+
+    // Filtrar por fecha
+    if (filtroFecha.trim() !== '') {
+      const search = filtroFecha.replace(/\//g, '-').toLowerCase();
+      filtrados = filtrados.filter((r) => {
+        return matchesSearchDate(r.fecha_reporte, search) || matchesSearchDate(r.created_at, search);
+      });
+    }
+
+    // Filtrar por búsqueda de equipo/servicio (searchQuery)
+    if (searchQuery.trim() !== '') {
+      const search = searchQuery.toLowerCase();
+      filtrados = filtrados.filter((r) => {
+        const equipo = (r.equipo_descripcion || '').toLowerCase();
+        const comentario = (r.comentario || '').toLowerCase();
+        const titulo = (r.titulo || '').toLowerCase();
+        const id = String(r.id).toLowerCase();
+        return equipo.includes(search) || comentario.includes(search) || titulo.includes(search) || id.includes(search);
+      });
+    }
+
+    return filtrados;
+  }, [listaReportesTerminados, filtrosPrioridad, filtroCliente, filtroID, filtroFecha, searchQuery]);
+
+  const tareasFiltradas = useMemo(() => {
+    if (!searchQuery.trim()) return listaTareas;
+    const search = searchQuery.toLowerCase();
+    return listaTareas.filter((t) => (t.descripcion || '').toLowerCase().includes(search));
+  }, [listaTareas, searchQuery]);
+
+  const tareasTerminadasFiltradas = useMemo(() => {
+    if (!searchQuery.trim()) return listaTareasTerminadas;
+    const search = searchQuery.toLowerCase();
+    return listaTareasTerminadas.filter((t) => (t.descripcion || '').toLowerCase().includes(search));
+  }, [listaTareasTerminadas, searchQuery]);
+
+  const inventarioFiltrado = useMemo(() => {
+    if (!searchQuery.trim()) return listaHerramientas;
+    const search = searchQuery.toLowerCase();
+    return listaHerramientas.filter((h) =>
+      (h.nombre_herramienta || '').toLowerCase().includes(search) ||
+      (h.categoria || '').toLowerCase().includes(search)
+    );
+  }, [listaHerramientas, searchQuery]);
+
+  // Helper function to check if report is canceled
+  const esCanceladoLike = (reporte: any) => {
+    const st = (reporte.estado || '').toLowerCase();
+    const motivo = String(reporte.motivo_cancelacion || '').toLowerCase();
+    const rechazoCotizacionNueva = motivo.includes('cotizacion nueva');
+    return st === 'cancelado' || st === 'rechazado' || rechazoCotizacionNueva || ((st === 'pendiente' || st === 'en_espera' || st === 'en espera') && !!reporte.motivo_cancelacion);
+  };
+
+  // Estado visual handling
+  const estadoVisual = (reporte: any) => (esCanceladoLike(reporte) ? 'rechazado' : reporte.estado);
+
+  // Estado display
+  const estadoDisplay = (estado?: string) => {
+    return obtenerNombreEstado(estado || '');
+  };
+
+  // Handle fecha filter change with formatting
+  const handleFiltroFechaChange = (value: string) => {
+    const digits = value.replace(/\D/g, '').slice(0, 8);
+    if (!digits) {
+      setFiltroFecha('');
+      return;
+    }
+    if (digits.length <= 4) {
+      setFiltroFecha(digits);
+      return;
+    }
+    if (digits.length <= 6) {
+      setFiltroFecha(`${digits.slice(0, 4)}/${digits.slice(4)}`);
+      return;
+    }
+    setFiltroFecha(`${digits.slice(0, 4)}/${digits.slice(4, 6)}/${digits.slice(6, 8)}`);
+  };
+
+  const params = useLocalSearchParams();
+
+  useFocusEffect(
+    useCallback(() => {
+      if (usuario?.email) {
+        cargarTareas();
+        cargarReportes();
+        cargarHerramientas();
+      }
+
+      // Cerrar todos los modales si viene el parámetro closeModals
+      if (params?.closeModals === 'true') {
+        setShowTareasModal(false);
+        setShowTareaDetalle(false);
+        setShowHistorialTareasModal(false);
+        setShowReportesModal(false);
+        setShowReporteDetalle(false);
+        setShowHistorialReportesModal(false);
+        setShowInventarioModal(false);
+        setShowArchivoModal(false);
+        setShowCotizarModal(false);
+        setShowLogout(false);
+        setShowPasswordModal(false);
+      }
+    }, [usuario?.email, params?.closeModals])
+  );
+
+  // Función para limpiar todos los estados de Fase 2 y cerrar modal
+  const cerrarModalReporteDetalle = () => {
+    setShowReporteDetalle(false);
+    setReporteSeleccionado(null);
+    setArchivosReporte([]);
+    // Limpiar estados de Fase 2
+    setRevision('');
+    setRecomendaciones('');
+    setReparacion('');
+    setRecomendacionesAdicionales('');
+    setMaterialesRefacciones('');
+    setDescripcionTrabajo(''); // Limpiar análisis al cerrar
+    setFotosRevisionUris([]); // Limpiar fotos de revisión
+    setFotosPostprocesoUris([]); // Limpiar imágenes de finalización
+  };
+
+  // Cargar datos de Fase 2 cuando se selecciona un reporte
+  useEffect(() => {
+    if (reporteSeleccionado) {
+      console.log('[EMPLEADO-FASE2-LOAD] Reporte seleccionado:', reporteSeleccionado);
+      console.log('[EMPLEADO-FASE2-LOAD] Campos Fase 2:', {
+        revision: reporteSeleccionado.revision,
+        recomendaciones: reporteSeleccionado.recomendaciones,
+        reparacion: reporteSeleccionado.reparacion,
+        recomendaciones_adicionales: reporteSeleccionado.recomendaciones_adicionales,
+        materiales_refacciones: reporteSeleccionado.materiales_refacciones
+      });
+
+      // Cargar datos de Fase 2 si existen
+      setRevision(reporteSeleccionado.revision || '');
+      setRecomendaciones(reporteSeleccionado.recomendaciones || '');
+      setReparacion(reporteSeleccionado.reparacion || '');
+      setRecomendacionesAdicionales(reporteSeleccionado.recomendaciones_adicionales || '');
+      setMaterialesRefacciones(reporteSeleccionado.materiales_refacciones || '');
+      setDescripcionTrabajo(reporteSeleccionado.analisis_general || '');
+    }
+  }, [reporteSeleccionado]);
+
+
+  const cargarHerramientas = async (silent: boolean = false) => {
+    if (!usuario?.id) return;
+    if (!silent) setLoadingHerramientas(true);
+    try {
+      const { success, data } = await obtenerInventarioEmpleadoBackend(usuario.id.toString());
+      if (success) {
+        setListaHerramientas(data || []);
+        setHerramientas(data?.length || 0);
+      }
+    } catch (error) {
+      console.error('Error cargando herramientas:', error);
+    } finally {
+      if (!silent) setLoadingHerramientas(false);
+    }
+  };
+
+  const cargarTareas = async (silent: boolean = false) => {
+    if (!usuario?.email) return;
+    if (!silent) setLoadingTareas(true);
+    try {
+      const { success, data } = await obtenerTareasEmpleadoBackend(usuario.email);
+      if (success) {
+        // Solo mostrar tareas pendientes, no las completadas
+        const tareasActivas = data?.filter((t: any) => t.estado === 'pendiente') || [];
+        setListaTareas(tareasActivas);
+        const pendientes = tareasActivas.length;
+        const terminadas = data?.filter((t: any) => t.estado === 'completada').length || 0;
+        setTareas(pendientes);
+        setTareasTerminadas(terminadas);
+      }
+    } catch (error) {
+      console.error('Error cargando tareas:', error);
+    } finally {
+      if (!silent) setLoadingTareas(false);
+    }
+  };
+
+  const marcarComoCompletada = async () => {
+    if (!tareaSeleccionada?.id) return;
+
+    setActualizandoTarea(true);
+    try {
+      const { success } = await actualizarEstadoTareaBackend(tareaSeleccionada.id, 'completada');
+      if (success) {
+        // Actualizar la tarea en la lista local
+        const tareasActualizadas = listaTareas.map((t: any) =>
+          t.id === tareaSeleccionada.id ? { ...t, estado: 'completada' } : t
+        );
+        setListaTareas(tareasActualizadas);
+
+        // Actualizar stats
+        const pendientes = tareasActualizadas.filter((t: any) => t.estado === 'pendiente').length;
+        const terminadas = tareasActualizadas.filter((t: any) => t.estado === 'completada').length;
+        setTareas(pendientes);
+        setTareasTerminadas(terminadas);
+
+        // Cerrar modales
+        setShowTareaDetalle(false);
+        setTareaSeleccionada(null);
+      }
+    } catch (error) {
+      console.error('Error al actualizar tarea:', error);
+    } finally {
+      setActualizandoTarea(false);
+    }
+  };
+
+  const cargarTareasTerminadas = async () => {
+    if (!usuario?.email) return;
+    setLoadingHistorialTareas(true);
+    try {
+      const { success, data } = await obtenerTareasEmpleadoBackend(usuario.email);
+      if (success) {
+        const terminadas = data?.filter((t: any) => t.estado === 'completada') || [];
+        setListaTareasTerminadas(terminadas);
+      }
+    } catch (error) {
+      console.error('Error cargando tareas terminadas:', error);
+    } finally {
+      setLoadingHistorialTareas(false);
+    }
+  };
+
+  const cargarReportes = async (silent: boolean = false) => {
+    if (!usuario?.email) return;
+    if (!silent) setLoadingReportes(true);
+    try {
+      const { success, data } = await obtenerReportesAsignados(usuario.email);
+      if (success) {
+        // Mapear los datos para extraer equipo_descripcion y comentario
+        const reportesMapeados = (data || []).map((r: any) => {
+          // El titulo tiene formato: "equipo_descripcion - sucursal"
+          const partes = (r.titulo || '').split(' - ');
+          const equipo_descripcion = partes[0] ? partes[0].trim() : 'Equipo / servicio';
+          const sucursal = partes.length > 1 ? partes[1].trim() : '';
+
+          // La descripcion tiene formato: "Modelo: xxx\nSerie: yyy\nSucursal: zzz\nComentario: aaa\nPrioridad: bbb"
+          let comentario = '';
+          const desc = r.descripcion || '';
+          const comentarioMatch = desc.match(/Comentario:\s*([^\n]+)/i);
+          if (comentarioMatch) comentario = comentarioMatch[1].trim();
+
+          return {
+            ...r,
+            equipo_descripcion,
+            sucursal,
+            comentario: comentario || 'Sin comentarios'
+          };
+        });
+
+        // Mostrar reportes asignados, pendientes, cotizados, en_cotizacion, en_proceso, aceptado_por_cliente, finalizado_por_tecnico y en_espera_confirmacion (excluir cerrados)
+        const reportesActivos = reportesMapeados.filter((r: any) =>
+          r.estado === 'asignado' ||
+          r.estado === 'en_cotizacion' ||
+          r.estado === 'pendiente' ||
+          r.estado === 'cotizado' ||
+          r.estado === 'aceptado_por_cliente' ||
+          r.estado === 'en_proceso' ||
+          r.estado === 'finalizado_por_tecnico' ||
+          r.estado === 'en_espera_confirmacion'
+        ) || [];
+        setListaReportes(reportesActivos);
+        const pendientes = reportesActivos.length;
+        const terminados = reportesMapeados.filter((r: any) =>
+          r.estado === 'finalizado_por_tecnico' ||
+          r.estado === 'cerrado_por_cliente' ||
+          r.estado === 'listo_para_encuesta' ||
+          r.estado === 'encuesta_satisfaccion' ||
+          r.estado === 'terminado' ||
+          r.estado === 'rechazado'
+        ).length || 0;
+        setReportes(pendientes);
+        setReportesTerminados(terminados);
+      }
+    } catch (error) {
+      console.error('Error cargando reportes:', error);
+    } finally {
+      if (!silent) setLoadingReportes(false);
+    }
+  };
+
+  // Polling para actualización en tiempo real (cada 10 segundos)
+  useEffect(() => {
+    if (!usuario?.email) return;
+
+    const interval = setInterval(() => {
+      console.log('[EMPLEADO-POLLING] Actualizando datos (silent)...');
+      cargarTareas(true);
+      cargarReportes(true);
+      cargarHerramientas(true);
+    }, 10000);
+
+    return () => clearInterval(interval);
+  }, [usuario?.email]);
+
+  const cargarReportesTerminados = async () => {
+    if (!usuario?.email) return;
+    setLoadingHistorialReportes(true);
+    try {
+      const { success, data } = await obtenerReportesAsignados(usuario.email);
+      if (success) {
+        // Mapear los datos para extraer equipo_descripcion y comentario
+        const reportesMapeados = (data || []).map((r: any) => {
+          // El titulo tiene formato: "equipo_descripcion - sucursal"
+          const partes = (r.titulo || '').split(' - ');
+          const equipo_descripcion = partes[0] ? partes[0].trim() : 'Equipo / servicio';
+          const sucursal = partes.length > 1 ? partes[1].trim() : '';
+
+          // La descripcion tiene formato: "Modelo: xxx\nSerie: yyy\nSucursal: zzz\nComentario: aaa\nPrioridad: bbb"
+          let comentario = '';
+          const desc = r.descripcion || '';
+          const comentarioMatch = desc.match(/Comentario:\s*([^\n]+)/i);
+          if (comentarioMatch) comentario = comentarioMatch[1].trim();
+
+          return {
+            ...r,
+            equipo_descripcion,
+            sucursal,
+            comentario: comentario || 'Sin comentarios'
+          };
+        });
+
+        // Mostrar reportes finalizados: finalizado_por_tecnico, cerrado_por_cliente, listo_para_encuesta, encuesta_satisfaccion, terminado, cerrado, resuelto, rechazado
+        const terminados = reportesMapeados.filter((r: any) => {
+          const st = (r.estado || '').toLowerCase();
+          return st === 'finalizado_por_tecnico' ||
+            st === 'cerrado_por_cliente' ||
+            st === 'listo_para_encuesta' ||
+            st === 'encuesta_satisfaccion' ||
+            st === 'terminado' ||
+            st === 'cerrado' ||
+            st === 'resuelto' ||
+            st === 'rechazado';
+        }) || [];
+        setListaReportesTerminados(terminados);
+      }
+    } catch (error) {
+      console.error('Error cargando reportes terminados:', error);
+    } finally {
+      setLoadingHistorialReportes(false);
+    }
+  };
+
+  const generarPDF = async (reporte: any) => {
+    if (generandoPDF !== null) return;
+    setGenerandoPDF(String(reporte.id));
+    console.log('[PDF] Iniciando proceso de generación...');
+    try {
+      // Extraer información del reporte
+      const fullDescripcion = reporte.descripcion || '';
+      const modeloMatch = fullDescripcion.match(/Modelo:\s*([^\n]+)/i);
+      const serieMatch = fullDescripcion.match(/Serie:\s*([^\n]+)/i);
+      const sucursalMatch = fullDescripcion.match(/Sucursal:\s*([^\n]+)/i);
+      const comentarioMatch = fullDescripcion.match(/Comentario:\s*([\s\S]+?)(?:\nPrioridad:|$)/i);
+
+      const modeloValue = modeloMatch ? modeloMatch[1].trim() : (reporte.equipo_modelo || 'N/A');
+      const serieValue = serieMatch ? serieMatch[1].trim() : (reporte.equipo_serie || 'N/A');
+      const sucursalValue = sucursalMatch ? sucursalMatch[1].trim() : (reporte.sucursal || 'N/A');
+      const comentarioFinal = comentarioMatch ? comentarioMatch[1].trim() : (reporte.comentario || '');
+
+      // Obtener archivos del reporte
+      let archivosReporte: any[] = [];
+      try {
+        const resArchivos = await obtenerArchivosReporteBackend(reporte.id);
+        if (resArchivos.success && resArchivos.data) {
+          archivosReporte = resArchivos.data;
+        }
+      } catch (err) {
+        console.error('[PDF] Error cargando archivos:', err);
+      }
+
+      const pdfArchivos = (archivosReporte || []).filter((a: any) => a.tipo_archivo !== 'audio');
+      const shouldBreakBeforeAttachments = pdfArchivos.length > 5;
+
+      const htmlTemplate = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    @page { margin: 0; size: A4; }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 210mm;
+      height: 297mm;
+    }
+    body { 
+      font-family: Arial, Helvetica, sans-serif; 
+      font-size: 9px;
+      color: #1a1a1a; 
+      -webkit-print-color-adjust: exact; 
+      print-color-adjust: exact; 
+      background: #fff;
+    }
+    .background-container {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 210mm;
+      height: 297mm;
+      z-index: 1;
+      overflow: hidden;
+    }
+    .background-image {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .page-wrapper {
+      position: relative;
+      z-index: 10;
+      width: 100%;
+      border-collapse: collapse;
+      border: none;
+    }
+    .page-wrapper > thead > tr > td,
+    .page-wrapper > tbody > tr > td,
+    .page-wrapper > tfoot > tr > td { padding: 0; }
+    
+    .body-content { 
+      padding: 0 28px;
+    }
+
+    /* ── Header spacer for repeating background logo ── */
+    .header-spacer { height: 180px; }
+
+    /* ── Report ID badge ── */
+    .report-id-bar {
+      text-align: right;
+      padding: 2px 0 8px 0;
+      font-size: 10px;
+      font-weight: 700;
+      color: #555;
+    }
+    .report-id-bar span {
+      background: #c41e3a;
+      color: #fff;
+      padding: 3px 12px;
+      border-radius: 3px;
+      font-size: 11px;
+      letter-spacing: 0.5px;
+    }
+
+    /* ── Compact section ── */
+    .section { 
+      display: block;
+      margin-bottom: 5px;
+      border: 1px solid #d0d0d0;
+      border-radius: 3px;
+      overflow: hidden;
+      page-break-inside: avoid;
+      break-inside: avoid;
+      -webkit-column-break-inside: avoid;
+      -moz-column-break-inside: avoid;
+    }
+    .force-page-break {
+      display: block;
+      page-break-before: always !important;
+      break-before: page !important;
+      page-break-inside: avoid !important;
+      break-inside: avoid !important;
+      visibility: hidden;
+      height: 0;
+      margin: 0;
+      padding: 0;
+    }
+    .section-header, .section-header-red { 
+      font-size: 7px; 
+      font-weight: 700; 
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      padding: 4px 8px;
+      -webkit-print-color-adjust: exact;
+      color: #fff;
+    }
+    .section-header { background: #1b3a5c; }
+    .section-header-red { background: #c41e3a; }
+
+    /* ── Data grid (table-based for reliability) ── */
+    .data-grid {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .data-grid td {
+      padding: 3px 6px;
+      vertical-align: top;
+      border-bottom: 1px solid #e8e8e8;
+      font-size: 8px;
+      line-height: 1.2;
+    }
+    .data-grid td:last-child { border-right: none; }
+    .data-grid .lbl {
+      font-size: 6px;
+      font-weight: 700;
+      color: #0077b6;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      display: block;
+      margin-bottom: 1px;
+    }
+    .data-grid .val {
+      color: #1a1a1a;
+      font-size: 8px;
+      word-break: break-word;
+      overflow-wrap: break-word;
+      white-space: pre-wrap;
+    }
+    .data-grid .val-price {
+      color: #c41e3a;
+      font-weight: 700;
+      font-size: 11px;
+    }
+    .data-grid .full-row td {
+      border-bottom: none;
+    }
+
+    /* ── Comment / text block ── */
+    .text-block {
+      padding: 4px 6px;
+      font-size: 8px;
+      line-height: 1.3;
+      color: #1a1a1a;
+      word-break: break-word;
+      white-space: pre-wrap;
+      page-break-inside: avoid;
+    }
+    .text-block .lbl {
+      font-size: 7px;
+      font-weight: 700;
+      color: #0077b6;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      display: block;
+      margin-bottom: 2px;
+    }
+
+    /* ── Signatures ── */
+    .signatures { 
+      margin-top: 40px;
+      padding: 0 28px 20px 28px;
+      page-break-inside: avoid;
+    }
+    .sig-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .sig-table td {
+      text-align: center;
+      vertical-align: bottom;
+      padding-bottom: 4px;
+      height: 50px;
+    }
+    .sig-line {
+      border-top: 1.5px solid #1a1a1a;
+      font-size: 8px;
+      font-weight: 700;
+      color: #333;
+      padding-top: 4px;
+      text-align: center;
+    }
+    .sig-spacer { width: 60px; }
+
+    /* ── Footer ── */
+    .pdf-footer { 
+      text-align: center; 
+      font-size: 7px; 
+      color: #aaa; 
+      padding: 4px 0 8px 0;
+    }
+
+    /* ── Page Number ── */
+    /* La numeración de páginas se genera desde Puppeteer en el footerTemplate */
+  </style>
+</head>
+<body>
+  <div class="background-container">
+    <img src="${PDF_TEMPLATE_BASE64}" class="background-image" />
+  </div>
+
+  <table class="page-wrapper">
+    <thead>
+      <tr>
+        <td>
+          <div class="header-spacer"></div>
+        </td>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>
+          <div class="body-content">
+
+      <!-- ═══ DATOS GENERALES ═══ -->
+      <div class="section">
+        <div class="section-header">Datos Generales</div>
+        <table class="data-grid">
+          <tr>
+            <td style="width:25%"><span class="lbl">Reporte</span><span class="val" style="color:#c41e3a; font-weight:700;">#${reporte.id}</span></td>
+            <td style="width:25%"><span class="lbl">Equipo / Servicio</span><span class="val">${reporte.equipo_descripcion || 'N/A'}</span></td>
+            <td style="width:25%"><span class="lbl">Modelo</span><span class="val">${modeloValue}</span></td>
+            <td style="width:25%"><span class="lbl">Serie</span><span class="val">${serieValue}</span></td>
+          </tr>
+          <tr>
+            <td><span class="lbl">Prioridad</span><span class="val">${(reporte.prioridad || 'media').charAt(0).toUpperCase() + (reporte.prioridad || 'media').slice(1)}</span></td>
+            <td><span class="lbl">Sucursal</span><span class="val">${sucursalValue}</span></td>
+            <td><span class="lbl">Estado</span><span class="val">${obtenerNombreEstado(reporte.estado)}</span></td>
+            <td><span class="lbl">Fecha de Creación</span><span class="val">${reporte.created_at ? new Date(reporte.created_at).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' }) : 'N/A'}</span></td>
+          </tr>
+          <tr>
+            <td colspan="2"><span class="lbl">Empresa</span><span class="val">${reporte.empresa || 'N/A'}</span></td>
+            <td colspan="2"><span class="lbl">Solicitante</span><span class="val">${reporte.usuario_nombre || ''} ${reporte.usuario_apellido || ''}</span></td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- ═══ COMENTARIO ═══ -->
+      ${comentarioFinal ? `
+      <div class="section">
+        <div class="section-header">Comentario / Problema</div>
+        <div class="text-block">${comentarioFinal}</div>
+      </div>` : ''}
+
+      <!-- ═══ TRABAJO REALIZADO ═══ -->
+      ${(reporte.reparacion || reporte.materiales_refacciones || reporte.recomendaciones || reporte.recomendaciones_adicionales) ? `
+      <div class="section">
+        <div class="section-header">Trabajo Realizado</div>
+        ${reporte.reparacion ? `<div class="text-block"><span class="lbl">Reparación Realizada</span>${reporte.reparacion}</div>` : ''}
+        ${reporte.materiales_refacciones ? `<div class="text-block" style="border-top:1px solid #e8e8e8;"><span class="lbl">Materiales / Refacciones</span>${reporte.materiales_refacciones}</div>` : ''}
+        ${reporte.recomendaciones ? `<div class="text-block" style="border-top:1px solid #e8e8e8;"><span class="lbl">Recomendaciones</span>${reporte.recomendaciones}</div>` : ''}
+        ${reporte.recomendaciones_adicionales ? `<div class="text-block" style="border-top:1px solid #e8e8e8;"><span class="lbl">Recomendaciones Adicionales</span>${reporte.recomendaciones_adicionales}</div>` : ''}
+      </div>` : ''}
+
+      <!-- ═══ ARCHIVOS ADJUNTOS ═══ -->
+      ${(pdfArchivos.length > 0) ? `
+      ${shouldBreakBeforeAttachments ? '<div class="force-page-break"></div>' : ''}
+      <div class="section">
+        <div class="section-header">Archivos Adjuntos</div>
+        <div class="text-block" style="font-size: 8px; line-height: 1.6;">
+          ${pdfArchivos
+            .map((a, i) => (i + 1) + '. ' + (a.nombre_original || (a.tipo_archivo === 'foto' ? 'Imagen' : 'Archivo')) + ' (' + a.tipo_archivo + ')')
+            .join('<br/>')}
+        </div>
+      </div>` : ''}
+    </div>
+
+    <!-- ═══ FIRMAS ═══ -->
+    <div class="signatures">
+      <table class="sig-table">
+        <tr>
+          <td></td>
+          <td class="sig-spacer"></td>
+          <td></td>
+        </tr>
+        <tr>
+          <td><div class="sig-line">Firma del Técnico</div></td>
+          <td class="sig-spacer"></td>
+          <td><div class="sig-line">Firma del Cliente</div></td>
+        </tr>
+      </table>
+    </div>
+
+    <!-- ═══ FOOTER ═══ -->
+    <div class="pdf-footer">si-mant.com</div>
+          </div>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</body>
+</html>`;
+
+      // --- GENERACIÓN (Web)
+      if (Platform.OS === 'web') {
+        try {
+          console.log('[PDF] Enviando petición al servidor');
+          const response = await fetch(`https://si-mant.com/api/pdf/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ html: htmlTemplate })
+          });
+          if (!response.ok) throw new Error('Error al generar PDF');
+          const arrayBuffer = await response.arrayBuffer();
+          const blob = new Blob([arrayBuffer], { type: 'application/pdf' });
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = 'Reporte_' + reporte.id + '_' + new Date().getTime() + '.pdf';
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          setTimeout(() => URL.revokeObjectURL(url), 100);
+          Alert.alert('PDF Descargado', 'El archivo se ha guardado en tu carpeta de descargas.', [{ text: 'OK' }]);
+        } catch (error) {
+          console.error('[PDF] Error:', error);
+          Alert.alert('Error', 'No se pudo generar el PDF');
+        }
+      } else {
+        // Generación móvil usando expo-print + expo-sharing
+        try {
+          const { uri } = await Print.printToFileAsync({ html: htmlTemplate });
+          const fileName = `Reporte_${reporte.id}_${new Date().getTime()}.pdf`;
+          const storageDir = Platform.OS === 'android' ? FileSystem.cacheDirectory : FileSystem.documentDirectory;
+          const downloadPath = `${storageDir}${fileName}`;
+          await FileSystem.moveAsync({ from: uri, to: downloadPath });
+          if (await Sharing.isAvailableAsync()) {
+            await Sharing.shareAsync(downloadPath, { mimeType: 'application/pdf', dialogTitle: 'Abrir PDF de Reporte', UTI: 'com.adobe.pdf' });
+          } else {
+            Alert.alert('PDF Generado', 'El archivo se ha guardado exitosamente.', [{ text: 'OK' }]);
+          }
+        } catch (error) {
+          console.error('[PDF] Error móvil:', error);
+          Alert.alert('Error', 'No se pudo generar el PDF en este dispositivo.');
+        }
+      }
+    } catch (error) {
+      console.error('[PDF] Error general:', error);
+      Alert.alert('Error', 'No se pudo generar el PDF');
+    } finally {
+      setGenerandoPDF(null);
+    }
+  };
+
+  // Genera un PDF de vista previa con el análisis actual (borrador) SIN enviar al backend
+  const generarPDFBorrador = async () => {
+    if (!reporteSeleccionado || !descripcionTrabajo.trim()) return;
+    if (generandoPDFBorrador) return;
+    setGenerandoPDFBorrador(true);
+    try {
+      const reporte = reporteSeleccionado;
+      const fullDescripcion = reporte.descripcion || '';
+      const modeloMatch = fullDescripcion.match(/Modelo:\s*([^\n]+)/i);
+      const serieMatch = fullDescripcion.match(/Serie:\s*([^\n]+)/i);
+      const sucursalMatch = fullDescripcion.match(/Sucursal:\s*([^\n]+)/i);
+      const comentarioMatch = fullDescripcion.match(/Comentario:\s*([\s\S]+?)(?:\nPrioridad:|$)/i);
+      const modeloValue = modeloMatch ? modeloMatch[1].trim() : 'N/A';
+      const serieValue = serieMatch ? serieMatch[1].trim() : 'N/A';
+      const sucursalValue = sucursalMatch ? sucursalMatch[1].trim() : (reporte.sucursal || 'N/A');
+      const comentarioFinal = comentarioMatch ? comentarioMatch[1].trim() : (reporte.comentario || '');
+
+      const htmlTemplate = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    @page { margin: 0; size: A4; }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 210mm;
+      height: 297mm;
+    }
+    body { 
+      font-family: Arial, Helvetica, sans-serif; 
+      font-size: 9px;
+      color: #1a1a1a; 
+      -webkit-print-color-adjust: exact; 
+      print-color-adjust: exact; 
+      background: #fff;
+    }
+    .background-container {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 210mm;
+      height: 297mm;
+      z-index: 1;
+      overflow: hidden;
+    }
+    .background-image {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .draft-watermark {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%) rotate(-35deg);
+      font-size: 80px;
+      font-weight: 900;
+      color: rgba(217,119,6,0.06);
+      pointer-events: none;
+      z-index: 0;
+      white-space: nowrap;
+      letter-spacing: 6px;
+    }
+    .page-wrapper {
+      position: relative;
+      z-index: 10;
+      width: 100%;
+      border-collapse: collapse;
+      border: none;
+    }
+    .page-wrapper > thead > tr > td,
+    .page-wrapper > tbody > tr > td,
+    .page-wrapper > tfoot > tr > td { padding: 0; }
+    
+    .body-content { 
+      padding: 0 28px;
+    }
+
+    .header-spacer { height: 180px; }
+
+    .report-id-bar {
+      text-align: right;
+      padding: 2px 0 8px 0;
+      font-size: 10px;
+      font-weight: 700;
+      color: #555;
+    }
+    .report-id-bar span {
+      background: #c41e3a;
+      color: #fff;
+      padding: 3px 12px;
+      border-radius: 3px;
+      font-size: 11px;
+      letter-spacing: 0.5px;
+    }
+
+    .section { 
+      display: block;
+      margin-bottom: 5px;
+      border: 1px solid #d0d0d0;
+      border-radius: 3px;
+      overflow: hidden;
+      page-break-inside: avoid;
+      break-inside: avoid;
+      -webkit-column-break-inside: avoid;
+      -moz-column-break-inside: avoid;
+    }
+    .section-header, .section-header-red, .section-header-orange { 
+      font-size: 7px; 
+      font-weight: 700; 
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      padding: 4px 8px;
+      -webkit-print-color-adjust: exact;
+      color: #fff;
+    }
+    .section-header { background: #1b3a5c; }
+    .section-header-red { background: #c41e3a; }
+    .section-header-orange { background: #d97706; }
+
+    .data-grid {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .data-grid td {
+      padding: 3px 6px;
+      vertical-align: top;
+      border-bottom: 1px solid #e8e8e8;
+      font-size: 8px;
+      line-height: 1.2;
+    }
+    .data-grid td:last-child { border-right: none; }
+    .data-grid .lbl {
+      font-size: 6px;
+      font-weight: 700;
+      color: #0077b6;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      display: block;
+      margin-bottom: 1px;
+    }
+    .data-grid .val {
+      color: #1a1a1a;
+      font-size: 8px;
+      word-break: break-word;
+      overflow-wrap: break-word;
+      white-space: pre-wrap;
+    }
+
+    .text-block {
+      padding: 4px 6px;
+      font-size: 8px;
+      line-height: 1.3;
+      color: #1a1a1a;
+      word-break: break-word;
+      white-space: pre-wrap;
+      page-break-inside: avoid;
+    }
+    .text-block .lbl {
+      font-size: 7px;
+      font-weight: 700;
+      color: #0077b6;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      display: block;
+      margin-bottom: 2px;
+    }
+
+    .signatures { 
+      margin-top: 40px;
+      padding: 0 28px 20px 28px;
+      page-break-inside: avoid;
+    }
+    .sig-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .sig-table td {
+      text-align: center;
+      vertical-align: bottom;
+      padding-bottom: 4px;
+      height: 50px;
+    }
+    .sig-line {
+      border-top: 1.5px solid #1a1a1a;
+      font-size: 8px;
+      font-weight: 700;
+      color: #333;
+      padding-top: 4px;
+      text-align: center;
+    }
+    .sig-spacer { width: 60px; }
+
+    .pdf-footer { 
+      text-align: center; 
+      font-size: 7px; 
+      color: #aaa; 
+      padding: 4px 0 8px 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="background-container">
+    <img src="${PDF_TEMPLATE_BASE64}" class="background-image" />
+  </div>
+  <div class="draft-watermark">BORRADOR</div>
+
+  <table class="page-wrapper">
+    <thead>
+      <tr>
+        <td>
+          <div class="header-spacer"></div>
+        </td>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>
+          <div class="body-content">
+
+      <!-- DATOS GENERALES -->
+      <div class="section">
+        <div class="section-header">Datos Generales</div>
+        <table class="data-grid">
+          <tr>
+            <td style="width:25%"><span class="lbl">Reporte</span><span class="val" style="color:#c41e3a; font-weight:700;">#${reporte.id}</span></td>
+            <td style="width:25%"><span class="lbl">Equipo / Servicio</span><span class="val">${reporte.equipo_descripcion || 'N/A'}</span></td>
+            <td style="width:25%"><span class="lbl">Modelo</span><span class="val">${modeloValue}</span></td>
+            <td style="width:25%"><span class="lbl">Serie</span><span class="val">${serieValue}</span></td>
+          </tr>
+          <tr>
+            <td><span class="lbl">Prioridad</span><span class="val">${(reporte.prioridad || 'media').charAt(0).toUpperCase() + (reporte.prioridad || 'media').slice(1)}</span></td>
+            <td><span class="lbl">Sucursal</span><span class="val">${sucursalValue}</span></td>
+            <td><span class="lbl">Estado</span><span class="val">${obtenerNombreEstado(reporte.estado)}</span></td>
+            <td><span class="lbl">Fecha de Creación</span><span class="val">${reporte.created_at ? new Date(reporte.created_at).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' }) : 'N/A'}</span></td>
+          </tr>
+          <tr>
+            <td colspan="2"><span class="lbl">Empresa</span><span class="val">${reporte.empresa || 'N/A'}</span></td>
+            <td colspan="2"><span class="lbl">Solicitante</span><span class="val">${reporte.usuario_nombre || ''} ${reporte.usuario_apellido || ''}</span></td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- COMENTARIO / PROBLEMA -->
+      ${comentarioFinal ? `
+      <div class="section">
+        <div class="section-header">Comentario / Problema</div>
+        <div class="text-block">${comentarioFinal}</div>
+      </div>` : ''}
+
+      <!-- ANÁLISIS TÉCNICO (BORRADOR) -->
+      <div class="section">
+        <div class="section-header">Análisis Técnico</div>
+        <div class="text-block">${descripcionTrabajo.trim().replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
+      </div>
+
+      <!-- TRABAJO REALIZADO -->
+      ${(reparacion || materialesRefacciones || recomendaciones || recomendacionesAdicionales) ? `
+      <div class="section">
+        <div class="section-header">Trabajo Realizado</div>
+        ${reparacion ? `<div class="text-block"><span class="lbl">Reparación Realizada</span>${reparacion.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>` : ''}
+        ${materialesRefacciones ? `<div class="text-block" style="border-top:1px solid #e8e8e8;"><span class="lbl">Materiales / Refacciones</span>${materialesRefacciones.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>` : ''}
+        ${recomendaciones ? `<div class="text-block" style="border-top:1px solid #e8e8e8;"><span class="lbl">Recomendaciones</span>${recomendaciones.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>` : ''}
+        ${recomendacionesAdicionales ? `<div class="text-block" style="border-top:1px solid #e8e8e8;"><span class="lbl">Recomendaciones Adicionales</span>${recomendacionesAdicionales.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>` : ''}
+      </div>` : ''}
+
+      ${(fotosRevisionUris.length > 0 || fotosPostprocesoUris.length > 0 || archivosReporte.some(a => a.tipo_archivo === 'foto_revision' || a.tipo_archivo === 'foto')) ? `
+      <div class="force-page-break"></div>
+      <div class="section">
+        <div class="section-header">Archivos Adjuntos (Borrador Local)</div>
+        <div class="text-block" style="font-size: 8px; line-height: 1.6;">
+          ${[
+            ...archivosReporte.filter(a => a.tipo_archivo === 'foto_revision' || a.tipo_archivo === 'foto').map(a => `${a.nombre_original || 'Imagen'} (${a.tipo_archivo})`),
+            ...fotosRevisionUris.map((uri) => {
+              const name = nombresArchivosLocalesCache.current[uri] || uri.split('/').pop();
+              return name?.includes('.') ? name + ' (foto_revision)' : 'Imagen (foto_revision)';
+            }), ...fotosPostprocesoUris.map((uri) => {
+              const name = nombresArchivosLocalesCache.current[uri] || uri.split('/').pop();
+              return name?.includes('.') ? name + ' (foto)' : 'Imagen (foto)';
+            })].map((txt, i) => (i + 1) + '. ' + txt).join('<br/>')}
+        </div>
+      </div>` : ''}
+
+    </div>
+
+    <!-- FIRMAS -->
+    <div class="signatures">
+      <table class="sig-table">
+        <tr>
+          <td></td>
+          <td class="sig-spacer"></td>
+          <td></td>
+        </tr>
+        <tr>
+          <td><div class="sig-line">Firma del Técnico</div></td>
+          <td class="sig-spacer"></td>
+          <td><div class="sig-line">Firma del Cliente</div></td>
+        </tr>
+      </table>
+    </div>
+
+    <!-- FOOTER -->
+    <div class="pdf-footer">si-mant.com</div>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</body>
+</html>`;
+
+      if (Platform.OS === 'web') {
+        const response = await fetch(`https://si-mant.com/api/pdf/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ html: htmlTemplate })
+        });
+        if (!response.ok) throw new Error('Error al generar PDF');
+        const arrayBuffer = await response.arrayBuffer();
+        const blob = new Blob([arrayBuffer], { type: 'application/pdf' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `VistaPrevia_Reporte_${reporte.id}.pdf`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        setTimeout(() => URL.revokeObjectURL(url), 100);
+        showToast('Vista previa descargada. Revísala y si está correcta, haz clic en Enviar Análisis.', 'info');
+      } else {
+        // Generación móvil del borrador
+        try {
+          const { uri } = await Print.printToFileAsync({ html: htmlTemplate });
+          const fileName = `VistaPrevia_Reporte_${reporte.id}.pdf`;
+          const storageDir = Platform.OS === 'android' ? FileSystem.cacheDirectory : FileSystem.documentDirectory;
+          const downloadPath = `${storageDir}${fileName}`;
+          await FileSystem.moveAsync({ from: uri, to: downloadPath });
+          if (await Sharing.isAvailableAsync()) {
+            await Sharing.shareAsync(downloadPath, { mimeType: 'application/pdf', dialogTitle: 'Vista previa PDF', UTI: 'com.adobe.pdf' });
+          } else {
+            showToast('Vista previa descargada.', 'info');
+          }
+        } catch (error) {
+          console.error('[PDF-BORRADOR] Error móvil:', error);
+          showToast('Error al generar la vista previa PDF', 'error');
+        }
+      }
+    } catch (error: any) {
+      console.error('[PDF-BORRADOR] Error:', error);
+      showToast('Error al generar la vista previa PDF', 'error');
+    } finally {
+      setGenerandoPDFBorrador(false);
+    }
+  };
+
+  // Genera un PDF de vista previa con Fase 1 (Analisis) y Fase 2 (Reparacion) SIN enviar al backend
+  const generarPDFBorradorExpress = async () => {
+    if (!reporteSeleccionado || !descripcionTrabajo.trim()) {
+      showToast('Por favor escribe el Análisis General para generar el PDF', 'warning');
+      return;
+    }
+    if (generandoPDFBorrador) return;
+    setGenerandoPDFBorrador(true);
+    try {
+      const reporte = reporteSeleccionado;
+      const fullDescripcion = reporte.descripcion || '';
+      const modeloMatch = fullDescripcion.match(/Modelo:\s*([^\n]+)/i);
+      const serieMatch = fullDescripcion.match(/Serie:\s*([^\n]+)/i);
+      const sucursalMatch = fullDescripcion.match(/Sucursal:\s*([^\n]+)/i);
+      const comentarioMatch = fullDescripcion.match(/Comentario:\s*([\s\S]+?)(?:\nPrioridad:|$)/i);
+      const modeloValue = modeloMatch ? modeloMatch[1].trim() : 'N/A';
+      const serieValue = serieMatch ? serieMatch[1].trim() : 'N/A';
+      const sucursalValue = sucursalMatch ? sucursalMatch[1].trim() : (reporte.sucursal || 'N/A');
+      const comentarioFinal = comentarioMatch ? comentarioMatch[1].trim() : (reporte.comentario || '');
+
+
+      const htmlTemplate = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    @page { margin: 0; size: A4; }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 210mm;
+      height: 297mm;
+    }
+    body { 
+      font-family: Arial, Helvetica, sans-serif; 
+      font-size: 9px;
+      color: #1a1a1a; 
+      -webkit-print-color-adjust: exact; 
+      print-color-adjust: exact; 
+      background: #fff;
+    }
+    .background-container {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 210mm;
+      height: 297mm;
+      z-index: 1;
+      overflow: hidden;
+    }
+    .background-image {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .draft-watermark {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%) rotate(-35deg);
+      font-size: 80px;
+      font-weight: 900;
+      color: rgba(217,119,6,0.06);
+      pointer-events: none;
+      z-index: 0;
+      white-space: nowrap;
+      letter-spacing: 6px;
+    }
+    .page-wrapper {
+      position: relative;
+      z-index: 10;
+      width: 100%;
+      border-collapse: collapse;
+      border: none;
+    }
+    .page-wrapper > thead > tr > td,
+    .page-wrapper > tbody > tr > td,
+    .page-wrapper > tfoot > tr > td { padding: 0; }
+    
+    .body-content { 
+      padding: 0 28px;
+    }
+
+    .header-spacer { height: 180px; }
+
+    .report-id-bar {
+      text-align: right;
+      padding: 2px 0 8px 0;
+      font-size: 10px;
+      font-weight: 700;
+      color: #555;
+    }
+    .report-id-bar span {
+      background: #c41e3a;
+      color: #fff;
+      padding: 3px 12px;
+      border-radius: 3px;
+      font-size: 11px;
+      letter-spacing: 0.5px;
+    }
+
+    .section { 
+      display: block;
+      margin-bottom: 5px;
+      border: 1px solid #d0d0d0;
+      border-radius: 3px;
+      overflow: hidden;
+      page-break-inside: avoid;
+      break-inside: avoid;
+      -webkit-column-break-inside: avoid;
+      -moz-column-break-inside: avoid;
+    }
+    .section-header, .section-header-red, .section-header-orange { 
+      font-size: 7px; 
+      font-weight: 700; 
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      padding: 4px 8px;
+      -webkit-print-color-adjust: exact;
+      color: #fff;
+    }
+    .section-header { background: #1b3a5c; }
+    .section-header-red { background: #c41e3a; }
+    .section-header-orange { background: #d97706; }
+
+    .data-grid {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .data-grid td {
+      padding: 3px 6px;
+      vertical-align: top;
+      border-bottom: 1px solid #e8e8e8;
+      font-size: 8px;
+      line-height: 1.2;
+    }
+    .data-grid td:last-child { border-right: none; }
+    .data-grid .lbl {
+      font-size: 6px;
+      font-weight: 700;
+      color: #0077b6;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      display: block;
+      margin-bottom: 1px;
+    }
+    .data-grid .val {
+      color: #1a1a1a;
+      font-size: 8px;
+      word-break: break-word;
+      overflow-wrap: break-word;
+      white-space: pre-wrap;
+    }
+
+    .text-block {
+      padding: 4px 6px;
+      font-size: 8px;
+      line-height: 1.3;
+      color: #1a1a1a;
+      word-break: break-word;
+      white-space: pre-wrap;
+      page-break-inside: avoid;
+    }
+    .text-block .lbl {
+      font-size: 7px;
+      font-weight: 700;
+      color: #0077b6;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      display: block;
+      margin-bottom: 2px;
+    }
+
+    .signatures { 
+      margin-top: 40px;
+      padding: 0 28px 20px 28px;
+      page-break-inside: avoid;
+    }
+    .sig-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .sig-table td {
+      text-align: center;
+      vertical-align: bottom;
+      padding-bottom: 4px;
+      height: 50px;
+    }
+    .sig-line {
+      border-top: 1.5px solid #1a1a1a;
+      font-size: 8px;
+      font-weight: 700;
+      color: #333;
+      padding-top: 4px;
+      text-align: center;
+    }
+    .sig-spacer { width: 60px; }
+
+    .pdf-footer { 
+      text-align: center; 
+      font-size: 7px; 
+      color: #aaa; 
+      padding: 4px 0 8px 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="background-container">
+    <img src="${PDF_TEMPLATE_BASE64}" class="background-image" />
+  </div>
+  <div class="draft-watermark">BORRADOR</div>
+
+  <table class="page-wrapper">
+    <thead>
+      <tr>
+        <td>
+          <div class="header-spacer"></div>
+        </td>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>
+          <div class="body-content">
+
+      <!-- DATOS GENERALES -->
+      <div class="section">
+        <div class="section-header">Datos Generales</div>
+        <table class="data-grid">
+          <tr>
+            <td style="width:25%"><span class="lbl">Reporte</span><span class="val" style="color:#c41e3a; font-weight:700;">#${reporte.id}</span></td>
+            <td style="width:25%"><span class="lbl">Equipo / Servicio</span><span class="val">${reporte.equipo_descripcion || 'N/A'}</span></td>
+            <td style="width:25%"><span class="lbl">Modelo</span><span class="val">${modeloValue}</span></td>
+            <td style="width:25%"><span class="lbl">Serie</span><span class="val">${serieValue}</span></td>
+          </tr>
+          <tr>
+            <td><span class="lbl">Prioridad</span><span class="val">${(reporte.prioridad || 'media').charAt(0).toUpperCase() + (reporte.prioridad || 'media').slice(1)}</span></td>
+            <td><span class="lbl">Sucursal</span><span class="val">${sucursalValue}</span></td>
+            <td><span class="lbl">Estado</span><span class="val">${obtenerNombreEstado(reporte.estado)}</span></td>
+            <td><span class="lbl">Fecha de Creación</span><span class="val">${reporte.created_at ? new Date(reporte.created_at).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' }) : 'N/A'}</span></td>
+          </tr>
+          <tr>
+            <td colspan="2"><span class="lbl">Empresa</span><span class="val">${reporte.empresa || 'N/A'}</span></td>
+            <td colspan="2"><span class="lbl">Solicitante</span><span class="val">${reporte.usuario_nombre || ''} ${reporte.usuario_apellido || ''}</span></td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- COMENTARIO / PROBLEMA -->
+      ${comentarioFinal ? `
+      <div class="section">
+        <div class="section-header">Comentario / Problema</div>
+        <div class="text-block">${comentarioFinal}</div>
+      </div>` : ''}
+
+      <!-- ANÁLISIS TÉCNICO -->
+      <div class="section">
+        <div class="section-header">Análisis Técnico</div>
+        <div class="text-block">${descripcionTrabajo.trim().replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
+      </div>
+
+      <!-- TRABAJO REALIZADO -->
+      ${(reparacion || materialesRefacciones || recomendaciones || recomendacionesAdicionales) ? `
+      <div class="section">
+        <div class="section-header">Trabajo Realizado</div>
+        ${reparacion ? `<div class="text-block"><span class="lbl">Reparación Realizada</span>${reparacion.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>` : ''}
+        ${materialesRefacciones ? `<div class="text-block" style="border-top:1px solid #e8e8e8;"><span class="lbl">Materiales / Refacciones</span>${materialesRefacciones.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>` : ''}
+        ${recomendaciones ? `<div class="text-block" style="border-top:1px solid #e8e8e8;"><span class="lbl">Recomendaciones</span>${recomendaciones.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>` : ''}
+        ${recomendacionesAdicionales ? `<div class="text-block" style="border-top:1px solid #e8e8e8;"><span class="lbl">Recomendaciones Adicionales</span>${recomendacionesAdicionales.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>` : ''}
+      </div>` : ''}
+
+      ${(fotosRevisionUris.length > 0 || fotosPostprocesoUris.length > 0) ? `
+      <div class="force-page-break"></div>
+      <div class="section">
+        <div class="section-header">Archivos Adjuntos</div>
+        <div class="text-block" style="font-size: 8px; line-height: 1.6;">
+          ${[...fotosRevisionUris.map((uri) => {
+        const name = nombresArchivosLocalesCache.current[uri] || uri.split('/').pop();
+        return name?.includes('.') ? name + ' (foto_revision)' : 'Imagen (foto_revision)';
+      }), ...fotosPostprocesoUris.map((uri) => {
+        const name = nombresArchivosLocalesCache.current[uri] || uri.split('/').pop();
+        return name?.includes('.') ? name + ' (foto)' : 'Imagen (foto)';
+      })].map((txt, i) => (i + 1) + '. ' + txt).join('<br/>')}
+        </div>
+      </div>` : ''}
+
+    </div>
+
+    <!-- FIRMAS -->
+    <div class="signatures">
+      <table class="sig-table">
+        <tr>
+          <td></td>
+          <td class="sig-spacer"></td>
+          <td></td>
+        </tr>
+        <tr>
+          <td><div class="sig-line">Firma del Técnico</div></td>
+          <td class="sig-spacer"></td>
+          <td><div class="sig-line">Firma del Cliente</div></td>
+        </tr>
+      </table>
+    </div>
+
+    <!-- FOOTER -->
+    <div class="pdf-footer">si-mant.com</div>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</body>
+</html>`;
+
+      if (Platform.OS === 'web') {
+        const response = await fetch(`https://si-mant.com/api/pdf/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ html: htmlTemplate })
+        });
+        if (!response.ok) throw new Error('Error al generar PDF');
+        const arrayBuffer = await response.arrayBuffer();
+        const blob = new Blob([arrayBuffer], { type: 'application/pdf' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `VistaPrevia_Express_${reporte.id}.pdf`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        setTimeout(() => URL.revokeObjectURL(url), 100);
+        showToast('Vista previa descargada. Revísala y si está correcta, haz clic en Finalizar Servicio CSC.', 'info');
+      } else {
+        // Generación móvil del borrador express
+        try {
+          const { uri } = await Print.printToFileAsync({ html: htmlTemplate });
+          const fileName = `VistaPrevia_Express_${reporte.id}.pdf`;
+          const storageDir = Platform.OS === 'android' ? FileSystem.cacheDirectory : FileSystem.documentDirectory;
+          const downloadPath = `${storageDir}${fileName}`;
+          await FileSystem.moveAsync({ from: uri, to: downloadPath });
+          if (await Sharing.isAvailableAsync()) {
+            await Sharing.shareAsync(downloadPath, { mimeType: 'application/pdf', dialogTitle: 'Vista previa PDF', UTI: 'com.adobe.pdf' });
+          } else {
+            showToast('Vista previa descargada.', 'info');
+          }
+        } catch (error) {
+          console.error('[PDF-BORRADOR-EXPRESS] Error móvil:', error);
+          showToast('Error al generar la vista previa PDF', 'error');
+        }
+      }
+    } catch (error: any) {
+      console.error('[PDF-BORRADOR] Error:', error);
+      showToast('Error al generar la vista previa PDF', 'error');
+    } finally {
+      setGenerandoPDFBorrador(false);
+    }
+  };
+
+  const actualizarEstadoReporte = async (nuevoEstado: string) => {
+    if (!reporteSeleccionado?.id) return;
+
+    setActualizandoReporte(true);
+    try {
+      const { success } = await actualizarEstadoReporteAsignado(reporteSeleccionado.id, nuevoEstado);
+      if (success) {
+        const reportesActualizados = listaReportes.map((r: any) =>
+          r.id === reporteSeleccionado.id ? { ...r, estado: nuevoEstado } : r
+        );
+        setListaReportes(reportesActualizados);
+
+        const pendientes = reportesActualizados.filter((r: any) =>
+          r.estado === 'pendiente' ||
+          r.estado === 'cotizado' ||
+          r.estado === 'en_proceso' ||
+          r.estado === 'finalizado_por_tecnico' ||
+          r.estado === 'en_cotizacion' ||
+          r.estado === 'en_espera_confirmacion'
+        ).length;
+        const terminados = reportesActualizados.filter((r: any) =>
+          r.estado === 'finalizado_por_tecnico' ||
+          r.estado === 'cerrado_por_cliente' ||
+          r.estado === 'listo_para_encuesta' ||
+          r.estado === 'encuesta_satisfaccion' ||
+          r.estado === 'terminado'
+        ).length;
+        setReportes(pendientes);
+        setReportesTerminados(terminados);
+
+        cerrarModalReporteDetalle();
+        setReporteSeleccionado(null);
+        setArchivosReporte([]);
+      }
+    } catch (error) {
+      console.error('Error al actualizar reporte:', error);
+    } finally {
+      setActualizandoReporte(false);
+    }
+  };
+
+  const confirmarRechazoAsignacion = async () => {
+    if (!reporteARechazar?.id) return;
+
+    setRechazandoAsignacion(true);
+    try {
+      const result = await rechazarAsignacionBackend(reporteARechazar.id, rechazoMotivo);
+
+      if (result.success) {
+        showToast('Asignación rechazada correctamente', 'success');
+
+        // Remove from local list
+        setListaReportes(prev => prev.filter(r => r.id !== reporteARechazar.id));
+        setReportes(prev => Math.max(0, prev - 1));
+
+        // Close modals
+        setShowRechazarModal(false);
+        setReporteARechazar(null);
+        setRechazoMotivo('');
+        setShowReporteDetalle(false);
+        setReporteSeleccionado(null);
+      } else {
+        showToast(result.error || 'Error al rechazar asignación', 'error');
+      }
+    } catch (error) {
+      console.error('[EMPLEADO] Error rechazando asignación:', error);
+      showToast('Error inesperado al rechazar asignación', 'error');
+    } finally {
+      setRechazandoAsignacion(false);
+    }
+  };
+
+  const showToast = (message: string, type: 'success' | 'error' | 'info' | 'warning' = 'info') => {
+    setToastMessage(message);
+    setToastType(type);
+    setTimeout(() => setToastMessage(''), 3000);
+  };
+
+  // Funciones de Audio
+  const startRecording = async () => {
+    try {
+      const permission = await Audio.requestPermissionsAsync();
+      if (permission.status !== 'granted') {
+        showToast('Se requiere permiso para usar el micrófono', 'warning');
+        return;
+      }
+
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY
+      );
+
+      setRecording(recording);
+      setIsRecording(true);
+      setRecordingDuration(0);
+
+      const interval = setInterval(() => {
+        setRecordingDuration(prev => prev + 1);
+      }, 1000);
+      setRecordingInterval(interval);
+
+    } catch (err) {
+      console.error('Failed to start recording', err);
+      showToast('Error al iniciar grabación', 'error');
+    }
+  };
+
+  const stopRecording = async () => {
+    if (!recording) return;
+
+    setIsRecording(false);
+    if (recordingInterval) clearInterval(recordingInterval);
+
+    try {
+      await recording.stopAndUnloadAsync();
+      const uri = recording.getURI();
+      setAudioUri(uri);
+      setRecording(null);
+    } catch (err) {
+      console.error('Failed to stop recording', err);
+    }
+  };
+
+  const playPauseAudio = async () => {
+    if (!audioUri) return;
+
+    if (playbackObject !== null) {
+      if (isPlaying) {
+        await playbackObject.pauseAsync();
+        setIsPlaying(false);
+      } else {
+        const status = await playbackObject.getStatusAsync();
+        if (status.isLoaded && status.positionMillis >= (status.durationMillis || 0)) {
+          await playbackObject.setPositionAsync(0);
+        }
+        await playbackObject.playAsync();
+        setIsPlaying(true);
+      }
+      return;
+    }
+
+    const { sound } = await Audio.Sound.createAsync(
+      { uri: audioUri },
+      { shouldPlay: true }
+    );
+    setPlaybackObject(sound);
+    setIsPlaying(true);
+
+    sound.setOnPlaybackStatusUpdate(async (status) => {
+      if (status.isLoaded && status.didJustFinish) {
+        setIsPlaying(false);
+        await sound.setPositionAsync(0);
+      }
+    });
+  };
+
+  const deleteRecording = async () => {
+    if (playbackObject) {
+      await playbackObject.unloadAsync();
+      setPlaybackObject(null);
+    }
+    setAudioUri(null);
+    setIsPlaying(false);
+    setRecordingDuration(0);
+  };
+
+  const formatDuration = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+  };
+
+  const confirmarEnvioAnalisis = () => {
+    if (!descripcionTrabajo.trim()) {
+      showToast('Por favor ingresa un análisis general', 'warning');
+      return;
+    }
+    setShowConfirmarAnalisis(true);
+  };
+
+  const seleccionarFotoRevision = async () => {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: false,
+        allowsMultipleSelection: true,
+        quality: 0.3,
+      });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        result.assets.forEach(asset => {
+          const fileName = asset.fileName || asset.uri.split('/').pop() || 'Imagen.jpg';
+          nombresArchivosLocalesCache.current[asset.uri] = fileName;
+        });
+        const newUris = result.assets.map(asset => asset.uri);
+        setFotosRevisionUris(prev => [...prev, ...newUris]);
+      }
+    } catch (error) {
+      console.error('Error al abrir la galería:', error);
+      showToast('Error al abrir la galería', 'error');
+    }
+  };
+
+  const seleccionarFotoPostproceso = async () => {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: false,
+        allowsMultipleSelection: true,
+        quality: 0.3,
+      });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        result.assets.forEach(asset => {
+          const fileName = asset.fileName || asset.uri.split('/').pop() || 'Imagen.jpg';
+          nombresArchivosLocalesCache.current[asset.uri] = fileName;
+        });
+        const newUris = result.assets.map(asset => asset.uri);
+        setFotosPostprocesoUris(prev => [...prev, ...newUris]);
+      }
+    } catch (error) {
+      console.error('Error al abrir la galería:', error);
+      showToast('Error al abrir la galería', 'error');
+    }
+  };
+
+  const eliminarFotoRevision = (index: number) => {
+    setFotosRevisionUris(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const limpiarFotosRevision = () => setFotosRevisionUris([]);
+
+  const eliminarFotoPostproceso = (index: number) => {
+    setFotosPostprocesoUris(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const limpiarFotosPostproceso = () => setFotosPostprocesoUris([]);
+
+  const guardarCotizacion = async () => {
+    if (!reporteSeleccionado?.id) return;
+
+    // --- Iniciar Progreso Premium ---
+    const hasAudio = !!audioUri;
+    const hasPhotos = fotosRevisionUris.length > 0;
+
+    // Configurar pasos dinámicamente
+    const steps = [{ label: 'Preparando...', icon: 'construct-outline', done: true }];
+    if (hasAudio) steps.push({ label: 'Subiendo Audio...', icon: 'mic-outline', done: false });
+    if (hasPhotos) steps.push({ label: 'Fotos de Revisión...', icon: 'images-outline', done: false });
+    steps.push({ label: 'Finalizando Análisis...', icon: 'cloud-upload-outline', done: false });
+
+    setUploadSteps(steps);
+    setCurrentUploadStep(hasAudio ? 1 : (hasPhotos ? 1 : 0));
+    setUploadProgress({ uploaded: 0, total: 0, phase: 'Preparando...', percent: 5 });
+    setEstimatedTimeLeft('');
+    setShowUploadProgress(true);
+
+    setGuardandoCotizacion(true);
+    setShowConfirmarAnalisis(false); // Cerrar modal de confirmación
+    try {
+      // 1. Subir multimedia con progreso
+      const uploadRes = await subirArchivosEmpleadoConProgreso(
+        reporteSeleccionado.id,
+        audioUri || undefined,
+        fotosRevisionUris,
+        [], // No hay postproceso en cotización normal
+        (uploaded, total, phase, elapsedMs) => {
+          // Determinar en qué paso estamos
+          let stepIdx = 0;
+          let phaseLabel = '';
+
+          if (phase === 'audio') {
+            stepIdx = steps.findIndex(s => s.label.includes('Audio'));
+            phaseLabel = 'Subiendo Nota de Voz...';
+          } else if (phase === 'foto_revision') {
+            stepIdx = steps.findIndex(s => s.label.includes('Revisión'));
+            phaseLabel = 'Subiendo Fotos de Revisión...';
+            // Marcar audio como completado si existía y estamos en fotos
+            if (hasAudio && stepIdx > 1) {
+              setUploadSteps(prev => prev.map((s, i) => i === 1 ? { ...s, done: true } : s));
+            }
+          }
+
+          if (stepIdx !== -1) {
+            setCurrentUploadStep(stepIdx);
+
+            // Cálculo de porcentaje global aproximado
+            const totalStepsCount = steps.length;
+            const stepWeight = 100 / totalStepsCount;
+            const basePercent = stepIdx * stepWeight;
+            const stepProgress = total > 0 ? (uploaded / total) * stepWeight : 0;
+            const totalPercent = Math.min(Math.round(basePercent + stepProgress), 95);
+
+            setUploadProgress({ uploaded, total, phase: phaseLabel, percent: totalPercent });
+
+            // Estimación de tiempo
+            if (uploaded > 0 && elapsedMs > 0) {
+              const msPerFile = elapsedMs / uploaded;
+              const remaining = total - uploaded;
+              const totalRemainingMs = remaining * msPerFile;
+              if (totalRemainingMs > 0) {
+                const seconds = Math.ceil(totalRemainingMs / 1000);
+                setEstimatedTimeLeft(`${seconds}s`);
+              }
+            }
+          }
+        }
+      );
+
+      if (!uploadRes.success) throw new Error(uploadRes.error);
+
+      // Paso Final: Actualizar base de datos
+      const finishStepIdx = steps.length - 1;
+      setCurrentUploadStep(finishStepIdx);
+      setUploadProgress({ uploaded: 1, total: 1, phase: 'Finalizando Análisis...', percent: 96 });
+      // Marcar pasos anteriores como hechos
+      setUploadSteps(prev => prev.map((s, i) => i < finishStepIdx ? { ...s, done: true } : s));
+
+      const respuesta = await actualizarEstadoReporteAsignado(
+        reporteSeleccionado.id,
+        'en_cotizacion',
+        descripcionTrabajo.trim()
+      );
+
+      if (respuesta.success) {
+        // Todo exitoso
+        setUploadSteps(prev => prev.map(s => ({ ...s, done: true })));
+        setUploadProgress(prev => ({ ...prev, percent: 100 }));
+
+        // Actualizar lista de reportes localmente
+        const reportesActualizados = listaReportes.map((r: any) =>
+          r.id === reporteSeleccionado.id ? { ...r, estado: 'en_cotizacion', analisis_general: descripcionTrabajo.trim() } : r
+        );
+        setListaReportes(reportesActualizados);
+
+        if (reporteSeleccionado) {
+          setReporteSeleccionado({
+            ...reporteSeleccionado,
+            estado: 'en_cotizacion',
+            analisis_general: descripcionTrabajo.trim()
+          });
+        }
+
+        const pendientes = reportesActualizados.filter((r: any) =>
+          r.estado === 'pendiente' ||
+          r.estado === 'cotizado' ||
+          r.estado === 'en_cotizacion' ||
+          r.estado === 'en_espera_confirmacion'
+        ).length;
+        setReportes(pendientes);
+
+        // Esperar un momento para que el usuario vea el 100%
+        setTimeout(() => {
+          setShowUploadProgress(false);
+          setShowCotizarModal(false);
+          setDescripcionTrabajo('');
+          showToast('Análisis enviado exitosamente. El reporte ahora está En Cotización.', 'success');
+          deleteRecording();
+          setFotosRevisionUris([]);
+          cerrarModalReporteDetalle();
+        }, 1200);
+
+      } else {
+        throw new Error(respuesta.error || 'Error al actualizar el estado');
+      }
+    } catch (error: any) {
+      console.error('[EMPLEADO-ANALISIS] Error:', error);
+      setShowUploadProgress(false);
+      showToast('Error: ' + (error.message || 'Error al guardar'), 'error');
+    } finally {
+      setGuardandoCotizacion(false);
+    }
+  };
+
+
+  const enviarAnalisisYReparacionExpress = async () => {
+    if (!reporteSeleccionado?.id) return;
+
+    // --- Iniciar Progreso Premium ---
+    const hasAudio = !!audioUri;
+    const hasPhotosRev = fotosRevisionUris.length > 0;
+    const hasPhotosPost = fotosPostprocesoUris.length > 0;
+
+    const steps = [{ label: 'Preparando...', icon: 'construct-outline', done: true }];
+    if (hasAudio) steps.push({ label: 'Subiendo Audio...', icon: 'mic-outline', done: false });
+    if (hasPhotosRev) steps.push({ label: 'Fotos de Revisión...', icon: 'images-outline', done: false });
+    if (hasPhotosPost) steps.push({ label: 'Fotos de Finalización...', icon: 'camera-outline', done: false });
+    steps.push({ label: 'Finalizando Servicio CSC...', icon: 'cloud-upload-outline', done: false });
+
+    setUploadSteps(steps);
+    setCurrentUploadStep(1);
+    setUploadProgress({ uploaded: 0, total: 0, phase: 'Preparando...', percent: 5 });
+    setEstimatedTimeLeft('');
+    setShowUploadProgress(true);
+
+    setGuardandoCotizacion(true); // Using this to show loading state
+    setGuardandoFase2(true);      // Also this one
+
+    try {
+      // Data needed for Phase 2.1 (Analisis)
+      const analisisTexto = descripcionTrabajo.trim();
+
+      // Data needed for Phase 3.1 (Reparacion)
+      const fase2Data = {
+        revision: revision,
+        recomendaciones,
+        reparacion,
+        recomendaciones_adicionales: recomendacionesAdicionales,
+        materiales_refacciones: materialesRefacciones,
+      };
+
+      console.log('[EMPLEADO-EXPRESS] Enviando análisis y reparación express', { analisisTexto, fase2Data });
+
+      // 1. Actualizar base de datos primero para asegurar el cambio de estado
+      const respuesta = await actualizarEstadoReporteAsignado(
+        reporteSeleccionado.id,
+        'revision completada',
+        analisisTexto,
+        precioCotizacion || null,
+        fase2Data
+      );
+
+      if (!respuesta.success) throw new Error(respuesta.error || 'Error al actualizar el reporte');
+
+      // 2. Subir multimedia con progreso
+      const uploadRes = await subirArchivosEmpleadoConProgreso(
+        reporteSeleccionado.id,
+        audioUri || undefined,
+        fotosRevisionUris,
+        fotosPostprocesoUris,
+        (uploaded, total, phase, elapsedMs) => {
+          let stepIdx = 0;
+          let phaseLabel = '';
+
+          if (phase === 'audio') {
+            stepIdx = steps.findIndex(s => s.label.includes('Audio'));
+            phaseLabel = 'Subiendo Nota de Voz...';
+          } else if (phase === 'foto_revision') {
+            stepIdx = steps.findIndex(s => s.label.includes('Revisión'));
+            phaseLabel = 'Subiendo Fotos de Revisión...';
+            // Marcar audio como hecho
+            const audioIdx = steps.findIndex(s => s.label.includes('Audio'));
+            if (audioIdx !== -1) {
+              setUploadSteps(prev => prev.map((s, i) => i === audioIdx ? { ...s, done: true } : s));
+            }
+          } else if (phase === 'foto_postproceso') {
+            stepIdx = steps.findIndex(s => s.label.includes('Finalización'));
+            phaseLabel = 'Subiendo Fotos de Finalización...';
+            // Marcar fotos revision como hecho
+            const revIdx = steps.findIndex(s => s.label.includes('Revisión'));
+            if (revIdx !== -1) {
+              setUploadSteps(prev => prev.map((s, i) => i <= revIdx && i > 0 ? { ...s, done: true } : s));
+            }
+          }
+
+          if (stepIdx !== -1) {
+            setCurrentUploadStep(stepIdx);
+
+            const totalStepsCount = steps.length;
+            const stepWeight = 100 / totalStepsCount;
+            const basePercent = stepIdx * stepWeight;
+            const stepProgress = total > 0 ? (uploaded / total) * stepWeight : 0;
+            const totalPercent = Math.min(Math.round(basePercent + stepProgress), 98);
+
+            setUploadProgress({ uploaded, total, phase: phaseLabel, percent: totalPercent });
+
+            if (uploaded > 0 && elapsedMs > 0) {
+              const msPerFile = elapsedMs / uploaded;
+              const remaining = total - uploaded;
+              const seconds = Math.ceil((remaining * msPerFile) / 1000);
+              if (seconds > 0) setEstimatedTimeLeft(`${seconds}s`);
+            }
+          }
+        }
+      );
+
+      // Finalización exitosa
+      setUploadSteps(prev => prev.map(s => ({ ...s, done: true })));
+      setUploadProgress({ uploaded: 1, total: 1, phase: 'Servicio CSC Completado', percent: 100 });
+
+      setTimeout(() => {
+        setShowUploadProgress(false);
+        showToast('¡Servicio CSC completado exitosamente!', 'success');
+
+        // Cleanup and close
+        setFotosRevisionUris([]);
+        setFotosPostprocesoUris([]);
+        setShowExpressModal(false);
+        setDescripcionTrabajo('');
+        setPrecioCotizacion('');
+        setRevision('');
+        setRecomendaciones('');
+        setReparacion('');
+        setRecomendacionesAdicionales('');
+        setMaterialesRefacciones('');
+        deleteRecording();
+        cerrarModalReporteDetalle();
+        cargarReportes();
+      }, 1500);
+
+    } catch (error: any) {
+      console.error('[EMPLEADO-EXPRESS] Error:', error);
+      setShowUploadProgress(false);
+      showToast('Error: ' + (error.message || 'Error inesperado'), 'error');
+    } finally {
+      setGuardandoCotizacion(false);
+      setGuardandoFase2(false);
+    }
+  };
+
+  const handleFinalizarTrabajo = async () => {
+    if (!reporteSeleccionado?.id) return;
+
+    // --- Iniciar Progreso Premium ---
+    const hasPhotos = fotosPostprocesoUris.length > 0;
+
+    const steps = [{ label: 'Preparando...', icon: 'construct-outline', done: true }];
+    if (hasPhotos) steps.push({ label: 'Fotos de Finalización...', icon: 'camera-outline', done: false });
+    steps.push({ label: 'Finalizando Reporte...', icon: 'cloud-upload-outline', done: false });
+
+    setUploadSteps(steps);
+    setCurrentUploadStep(hasPhotos ? 1 : 0);
+    setUploadProgress({ uploaded: 0, total: 0, phase: 'Preparando...', percent: 5 });
+    setEstimatedTimeLeft('');
+    setShowUploadProgress(true);
+
+    setGuardandoFase2(true);
+    setShowConfirmarFinalizarModal(false);
+
+    try {
+      const fase2Data = {
+        revision,
+        recomendaciones,
+        reparacion,
+        recomendaciones_adicionales: recomendacionesAdicionales,
+        materiales_refacciones: materialesRefacciones,
+      };
+
+      console.log('[EMPLEADO-FASE2] Enviando datos de Fase 2:', fase2Data);
+
+      // 1. Actualizar estado primero
+      const updateResult = await actualizarEstadoReporteAsignado(
+        reporteSeleccionado.id,
+        'finalizado_por_tecnico',
+        undefined,
+        undefined,
+        fase2Data
+      );
+
+      if (!updateResult.success) throw new Error(updateResult.error || 'Error al actualizar el reporte');
+
+      // 2. Subir imágenes si existen con progreso
+      if (hasPhotos) {
+        const uploadRes = await subirArchivosEmpleadoConProgreso(
+          reporteSeleccionado.id,
+          undefined, // no audio
+          [], // no revision photos
+          fotosPostprocesoUris,
+          (uploaded, total, phase, elapsedMs) => {
+            const stepIdx = steps.findIndex(s => s.label.includes('Finalización'));
+            if (stepIdx !== -1) {
+              setCurrentUploadStep(stepIdx);
+              const totalStepsCount = steps.length;
+              const stepWeight = 100 / totalStepsCount;
+              const basePercent = stepIdx * stepWeight;
+              const stepProgress = total > 0 ? (uploaded / total) * stepWeight : 0;
+              const totalPercent = Math.min(Math.round(basePercent + stepProgress), 95);
+              setUploadProgress({ uploaded, total, phase: 'Subiendo Imágenes...', percent: totalPercent });
+            }
+          }
+        );
+        if (!uploadRes.success) throw new Error(uploadRes.error);
+      }
+
+      // Finalización
+      setUploadSteps(prev => prev.map(s => ({ ...s, done: true })));
+      setUploadProgress({ uploaded: 1, total: 1, phase: 'Reporte Finalizado', percent: 100 });
+
+      setTimeout(() => {
+        setShowUploadProgress(false);
+        showToast('Trabajo guardado. El admin debe confirmar para finalizar oficialmente.', 'success');
+        setFotosPostprocesoUris([]); // Limpiar estado
+        cerrarModalReporteDetalle();
+        cargarReportes();
+      }, 1500);
+
+    } catch (error: any) {
+      console.error('[EMPLEADO-FASE2] Error:', error);
+      setShowUploadProgress(false);
+      showToast('Error: ' + (error.message || 'Error al guardar'), 'error');
+    } finally {
+      setGuardandoFase2(false);
+    }
+  };
+
+  const initials = useMemo(() => {
+    const nombre = usuario?.nombre?.trim();
+    if (!nombre) return 'EM';
+    return nombre
+      .split(' ')
+      .map((n) => n.charAt(0).toUpperCase())
+      .join('')
+      .slice(0, 2);
+  }, [usuario?.nombre]);
+
+  const handleDrop = (e: any) => {
+    if (Platform.OS !== 'web') return;
+    e.preventDefault();
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      Array.from(files).forEach((file: any) => {
+        if (file.type.startsWith('image/')) {
+          const reader = new FileReader();
+          reader.onload = (event) => {
+            const uri = event.target?.result as string;
+            setFotosRevisionUris(prev => [...prev, uri]);
+          };
+          reader.readAsDataURL(file);
+        }
+      });
+    }
+  };
+
+  const handleDragOver = (e: any) => {
+    if (Platform.OS !== 'web') return;
+    e.preventDefault();
+  };
+
+  const stats = [
+    {
+      label: 'Tareas',
+      value: tareas,
+      iconBg: '#312e81', // Indigo
+      iconName: 'checkmark-circle-outline' as const,
+      accent: '#4f46e5',
+    },
+    {
+      label: 'Reportes',
+      value: reportes,
+      iconBg: '#1e3a8a', // Blue
+      iconName: 'document-text-outline' as const,
+      accent: '#3b82f6',
+    },
+    {
+      label: 'Tareas Terminadas',
+      value: tareasTerminadas,
+      iconBg: '#047857', // Emerald
+      iconName: 'archive-outline' as const,
+      accent: '#10b981',
+    },
+    {
+      label: 'Herramientas',
+      value: herramientas,
+      iconBg: '#134e4a', // Teal
+      iconName: 'construct-outline' as const,
+      accent: '#0d9488',
+    },
+  ];
+
+  const menuOptions = [
+    {
+      title: 'Reportes',
+      description: 'Crear y visualizar reportes',
+      gradientStart: '#1e3a8a',
+      gradientEnd: '#3b82f6',
+      iconName: 'document-text' as const,
+    },
+    {
+      title: 'Reportes Terminados',
+      description: 'Ver reportes completados',
+      gradientStart: '#4c1d95',
+      gradientEnd: '#7c3aed',
+      iconName: 'checkmark-circle' as const,
+    },
+    {
+      title: 'Tareas',
+      description: 'Ver mis tareas asignadas',
+      gradientStart: '#312e81',
+      gradientEnd: '#4f46e5',
+      iconName: 'checkmark-circle' as const,
+    },
+    {
+      title: 'Historial de Tareas',
+      description: 'Consultar tareas completadas',
+      gradientStart: '#047857',
+      gradientEnd: '#059669',
+      iconName: 'archive' as const,
+    },
+    {
+      title: 'Inventario',
+      description: 'Ver mis herramientas asignadas',
+      gradientStart: '#134e4a',
+      gradientEnd: '#0d9488',
+      iconName: 'construct' as const,
+    },
+  ];
+
+  const handleMenuPress = (title: string) => {
+    if (title === 'Tareas') {
+      setShowTareasModal(true);
+    } else if (title === 'Historial de Tareas') {
+      cargarTareasTerminadas();
+      setShowHistorialTareasModal(true);
+    } else if (title === 'Reportes') {
+      cargarReportes();
+      setShowReportesModal(true);
+    } else if (title === 'Reportes Terminados') {
+      cargarReportesTerminados();
+      setShowHistorialReportesModal(true);
+    } else if (title === 'Inventario') {
+      cargarHerramientas();
+      setShowInventarioModal(true);
+    } else {
+      console.log('Pressed:', title);
+    }
+  };
+
+  const confirmLogout = async () => {
+    try {
+      await AsyncStorage.removeItem('user');
+      router.replace('/');
+    } catch (error) {
+      console.error('Error during logout:', error);
+    }
+  };
+
+  const handleUpdatePassword = async () => {
+    setPasswordErrors({ currentPassword: '', newPassword: '', confirmPassword: '', general: '' });
+    let isValid = true;
+    const newErrors = { currentPassword: '', newPassword: '', confirmPassword: '', general: '' };
+
+    if (!passwordForm.currentPassword) {
+      newErrors.currentPassword = 'La contraseña actual es requerida.';
+      isValid = false;
+    }
+
+    if (!passwordForm.newPassword) {
+      newErrors.newPassword = 'La nueva contraseña es requerida.';
+      isValid = false;
+    } else if (passwordForm.newPassword.length < 6) {
+      newErrors.newPassword = 'Mínimo 6 caracteres.';
+      isValid = false;
+    } else if (passwordForm.newPassword === passwordForm.currentPassword) {
+      newErrors.newPassword = 'Debe ser diferente a la actual.';
+      isValid = false;
+    }
+
+    if (!passwordForm.confirmPassword) {
+      newErrors.confirmPassword = 'Confirma tu nueva contraseña.';
+      isValid = false;
+    } else if (passwordForm.newPassword !== passwordForm.confirmPassword) {
+      newErrors.confirmPassword = 'Las contraseñas no coinciden.';
+      isValid = false;
+    }
+
+    if (!isValid) {
+      setPasswordErrors(newErrors);
+      return;
+    }
+
+    setLoadingPassword(true);
+    try {
+      const response = await apiCall('/auth/change-password', 'PUT', {
+        currentPassword: passwordForm.currentPassword,
+        newPassword: passwordForm.newPassword
+      });
+
+      if (response.success) {
+        setShowPasswordModal(false);
+        setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+        setPasswordErrors({ currentPassword: '', newPassword: '', confirmPassword: '', general: '' });
+        showToast('Contraseña actualizada correctamente', 'success');
+      } else if (response.error === 'La contraseña actual es incorrecta') {
+        setPasswordErrors((prev) => ({ ...prev, currentPassword: 'La contraseña actual no es correcta.' }));
+      } else {
+        setPasswordErrors((prev) => ({ ...prev, general: response.error || 'No se pudo actualizar.' }));
+      }
+    } catch (error: any) {
+      console.error('Error changing password:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Error desconocido';
+      setPasswordErrors((prev) => ({ ...prev, general: `Error de conexión: ${errorMessage}` }));
+    } finally {
+      setLoadingPassword(false);
+    }
+  };
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={[styles.container, isMobile && styles.containerMobile]}>
+          <View style={[styles.headerRow, isMobile && styles.headerRowMobile]}>
+            <View style={styles.headerLeft}>
+              <View style={styles.badgeWrapper}>
+                <LinearGradient
+                  colors={['#06b6d4', '#0891b2']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={[styles.badge, isMobile && styles.badgeMobile]}
+                >
+                  <Text style={[styles.badgeText, { fontFamily }]}>{initials}</Text>
+                </LinearGradient>
+                <View style={styles.badgeDot} />
+              </View>
+
+              <View style={styles.welcomeTextWrapper}>
+                <Text style={[styles.welcomeTitle, isMobile && styles.welcomeTitleMobile, { fontFamily }]}>Bienvenido <Text style={styles.welcomeName}>{usuario?.nombre ?? 'Usuario'}</Text></Text>
+                <Text style={[styles.welcomeSubtitle, { fontFamily }]}>Panel de Empleado</Text>
+              </View>
+            </View>
+
+            <View style={styles.headerActions}>
+              <TouchableOpacity onPress={() => setShowPasswordModal(true)} style={styles.toggleButton} activeOpacity={0.8}>
+                <Ionicons name="key-outline" size={18} color="#94a3b8" />
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => setShowStats(!showStats)} style={styles.toggleButton} activeOpacity={0.8}>
+                <Ionicons name={showStats ? "eye-off-outline" : "eye-outline"} size={18} color="#94a3b8" />
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => setShowLogout(true)} style={styles.logoutButton} activeOpacity={0.8}>
+                <Ionicons name="log-out-outline" size={18} color="#94a3b8" />
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {showStats && (
+            <View style={[styles.statsRow, isMobile && styles.statsRowMobile]}>
+              {stats.map((stat, index) => (
+                <View key={index} style={[styles.statCard, isMobile && styles.statCardMobile]}>
+                  <View style={styles.statHeader}>
+                    <View style={[styles.statIcon, { backgroundColor: stat.iconBg }]}>
+                      <Ionicons name={stat.iconName as any} size={24} color="white" />
+                    </View>
+                    <View style={styles.statChip}>
+                      <Text style={[styles.statChipText, { fontFamily }]}>Hoy</Text>
+                    </View>
+                  </View>
+                  <Text style={[styles.statValue, { fontFamily }]}>{stat.value}</Text>
+                  <Text style={[styles.statLabel, { fontFamily, color: stat.accent }]}>{stat.label}</Text>
+                </View>
+              ))}
+
+              <Modal
+                visible={showPasswordModal}
+                transparent
+                animationType="fade"
+                onRequestClose={() => {
+                  setShowPasswordModal(false);
+                  setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+                  setPasswordErrors({ currentPassword: '', newPassword: '', confirmPassword: '', general: '' });
+                }}
+              >
+                <View style={[styles.modalOverlay, isMobile && styles.modalOverlayMobile]}>
+                  <View
+                    style={[
+                      styles.modalCard,
+                      {
+                        width: isMobile ? '95%' : 400,
+                        maxWidth: 420,
+                        padding: 0,
+                        overflow: 'hidden'
+                      }
+                    ]}
+                  >
+                    <LinearGradient colors={['#1e293b', '#0f172a']} style={{ width: '100%', padding: 24 }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 }}>
+                        <View>
+                          <Text style={[styles.modalTitle, { fontFamily, fontSize: 20, marginBottom: 4 }]}>Cambiar Contraseña</Text>
+                          <Text style={[styles.modalBodyText, { fontFamily, color: '#94a3b8' }]}>Actualiza tu clave de acceso</Text>
+                        </View>
+                        <TouchableOpacity
+                          onPress={() => {
+                            setShowPasswordModal(false);
+                            setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+                            setPasswordErrors({ currentPassword: '', newPassword: '', confirmPassword: '', general: '' });
+                          }}
+                          style={{ padding: 4 }}
+                        >
+                          <Ionicons name="close" size={24} color="#64748b" />
+                        </TouchableOpacity>
+                      </View>
+
+                      {passwordErrors.general ? (
+                        <View style={{ backgroundColor: 'rgba(239, 68, 68, 0.2)', padding: 10, borderRadius: 8, marginBottom: 10 }}>
+                          <Text style={{ color: '#f87171', fontFamily, fontSize: 13, textAlign: 'center' }}>{passwordErrors.general}</Text>
+                        </View>
+                      ) : null}
+
+                      <View style={{ gap: 20 }}>
+                        <View>
+                          <Text style={{ fontFamily, color: '#e2e8f0', marginBottom: 8, fontSize: 14, fontWeight: '500' }}>Contraseña Actual</Text>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#1e293b', borderWidth: 1, borderColor: passwordErrors.currentPassword ? '#ef4444' : '#334155', borderRadius: 8, paddingHorizontal: 12 }}>
+                            <Ionicons name="lock-closed-outline" size={18} color={passwordErrors.currentPassword ? '#ef4444' : '#64748b'} style={{ marginRight: 8 }} />
+                            <TextInput
+                              style={{ flex: 1, fontFamily, color: 'white', paddingVertical: 12, fontSize: 15 }}
+                              secureTextEntry
+                              value={passwordForm.currentPassword}
+                              onChangeText={(text) => {
+                                setPasswordForm((prev) => ({ ...prev, currentPassword: text }));
+                                if (passwordErrors.currentPassword) setPasswordErrors((prev) => ({ ...prev, currentPassword: '' }));
+                              }}
+                              placeholder="Ingresa tu contraseña actual"
+                              placeholderTextColor="#475569"
+                            />
+                          </View>
+                          {passwordErrors.currentPassword ? <Text style={{ color: '#ef4444', fontSize: 12, marginTop: 4, fontFamily, marginLeft: 4 }}>{passwordErrors.currentPassword}</Text> : null}
+                        </View>
+
+                        <View>
+                          <Text style={{ fontFamily, color: '#e2e8f0', marginBottom: 8, fontSize: 14, fontWeight: '500' }}>Nueva Contraseña</Text>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#1e293b', borderWidth: 1, borderColor: passwordErrors.newPassword ? '#ef4444' : '#334155', borderRadius: 8, paddingHorizontal: 12 }}>
+                            <Ionicons name="key-outline" size={18} color={passwordErrors.newPassword ? '#ef4444' : '#64748b'} style={{ marginRight: 8 }} />
+                            <TextInput
+                              style={{ flex: 1, fontFamily, color: 'white', paddingVertical: 12, fontSize: 15 }}
+                              secureTextEntry
+                              value={passwordForm.newPassword}
+                              onChangeText={(text) => {
+                                setPasswordForm((prev) => ({ ...prev, newPassword: text }));
+                                if (passwordErrors.newPassword) setPasswordErrors((prev) => ({ ...prev, newPassword: '' }));
+                              }}
+                              placeholder="Ingresa la nueva contraseña"
+                              placeholderTextColor="#475569"
+                            />
+                          </View>
+                          {passwordErrors.newPassword ? <Text style={{ color: '#ef4444', fontSize: 12, marginTop: 4, fontFamily, marginLeft: 4 }}>{passwordErrors.newPassword}</Text> : null}
+                        </View>
+
+                        <View>
+                          <Text style={{ fontFamily, color: '#e2e8f0', marginBottom: 8, fontSize: 14, fontWeight: '500' }}>Confirmar Nueva Contraseña</Text>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#1e293b', borderWidth: 1, borderColor: passwordErrors.confirmPassword ? '#ef4444' : '#334155', borderRadius: 8, paddingHorizontal: 12 }}>
+                            <Ionicons name="shield-checkmark-outline" size={18} color={passwordErrors.confirmPassword ? '#ef4444' : '#64748b'} style={{ marginRight: 8 }} />
+                            <TextInput
+                              style={{ flex: 1, fontFamily, color: 'white', paddingVertical: 12, fontSize: 15 }}
+                              secureTextEntry
+                              value={passwordForm.confirmPassword}
+                              onChangeText={(text) => {
+                                setPasswordForm((prev) => ({ ...prev, confirmPassword: text }));
+                                if (passwordErrors.confirmPassword) setPasswordErrors((prev) => ({ ...prev, confirmPassword: '' }));
+                              }}
+                              placeholder="Confirma la nueva contraseña"
+                              placeholderTextColor="#475569"
+                            />
+                          </View>
+                          {passwordErrors.confirmPassword ? <Text style={{ color: '#ef4444', fontSize: 12, marginTop: 4, fontFamily, marginLeft: 4 }}>{passwordErrors.confirmPassword}</Text> : null}
+                        </View>
+
+                        <TouchableOpacity
+                          onPress={handleUpdatePassword}
+                          disabled={loadingPassword}
+                          style={{
+                            backgroundColor: '#06b6d4',
+                            borderRadius: 8,
+                            paddingVertical: 14,
+                            alignItems: 'center',
+                            marginTop: 12,
+                            shadowColor: '#06b6d4',
+                            shadowOffset: { width: 0, height: 4 },
+                            shadowOpacity: 0.2,
+                            shadowRadius: 8,
+                            elevation: 4,
+                            opacity: loadingPassword ? 0.7 : 1
+                          }}
+                        >
+                          {loadingPassword ? (
+                            <ActivityIndicator color="white" size="small" />
+                          ) : (
+                            <Text style={{ fontFamily, color: 'white', fontWeight: '600', fontSize: 16 }}>Actualizar Contraseña</Text>
+                          )}
+                        </TouchableOpacity>
+                      </View>
+                    </LinearGradient>
+                  </View>
+                </View>
+              </Modal>
+            </View>
+          )}
+
+          <View style={[styles.sectionHeader, isMobile && styles.sectionHeaderMobile]}>
+            <Text style={[styles.sectionTitle, isMobile && styles.sectionTitleMobile, { fontFamily }]}>Opciones Principales</Text>
+            <Text style={[styles.sectionSubtitle, { fontFamily }]}>Accede a tus tareas y reportes</Text>
+          </View>
+
+          <View style={[styles.optionsGrid, isMobile && styles.optionsGridMobile]}>
+            {menuOptions.map((option, index) => (
+              <TouchableOpacity
+                key={index}
+                activeOpacity={0.9}
+                style={[styles.optionTouchable, isMobile && styles.optionTouchableMobile]}
+                onPress={() => handleMenuPress(option.title)}
+              >
+                <LinearGradient
+                  colors={[option.gradientStart, option.gradientEnd]}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.optionCard}
+                >
+                  <View style={styles.optionContent}>
+                    <View style={styles.optionIconWrapper}>
+                      <Ionicons name={option.iconName as any} size={28} color="white" />
+                    </View>
+                    <View style={styles.optionTextWrapper}>
+                      <Text style={[styles.optionTitle, { fontFamily }]}>{option.title}</Text>
+                      <Text style={[styles.optionDescription, { fontFamily }]}>{option.description}</Text>
+                    </View>
+                  </View>
+                </LinearGradient>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+      </ScrollView>
+
+      {showLogout && (
+        <View style={styles.overlay}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeaderRow}>
+              <View style={[styles.modalIconWrapper, { backgroundColor: 'rgba(248, 113, 113, 0.2)', borderColor: 'rgba(248, 113, 113, 0.5)' }]}>
+                <Ionicons name="alert-circle-outline" size={22} color="#f87171" />
+              </View>
+              <Text style={[styles.modalTitle, { fontFamily }]}>Cerrar sesión</Text>
+            </View>
+            <Text style={[styles.modalBodyText, { fontFamily }]}>¿Seguro que deseas salir? Se cerrará tu sesión en este dispositivo.</Text>
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={styles.modalSecondary} onPress={() => setShowLogout(false)}>
+                <Text style={[styles.modalSecondaryText, { fontFamily }]}>Cancelar</Text>
+              </TouchableOpacity>
+              <LinearGradient
+                colors={['#ef4444', '#dc2626']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 0 }}
+                style={styles.modalPrimary}
+              >
+                <TouchableOpacity onPress={confirmLogout} activeOpacity={0.85}>
+                  <Text style={[styles.modalPrimaryText, { fontFamily }]}>Cerrar sesión</Text>
+                </TouchableOpacity>
+              </LinearGradient>
+            </View>
+          </View>
+        </View>
+      )}
+
+      {showConfirmarAnalisis && (
+        <View style={styles.overlay}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeaderRow}>
+              <View style={[styles.modalIconWrapper, { backgroundColor: 'rgba(217, 119, 6, 0.2)', borderColor: 'rgba(217, 119, 6, 0.5)' }]}>
+                <Ionicons name="send-outline" size={22} color="#d97706" />
+              </View>
+              <Text style={[styles.modalTitle, { fontFamily }]}>Confirmar envío</Text>
+            </View>
+            <Text style={[styles.modalBodyText, { fontFamily }]}>¿Estás seguro de enviar este análisis? El reporte pasará a estado "En Cotización".</Text>
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={styles.modalSecondary} onPress={() => setShowConfirmarAnalisis(false)}>
+                <Text style={[styles.modalSecondaryText, { fontFamily }]}>Cancelar</Text>
+              </TouchableOpacity>
+              <LinearGradient
+                colors={['#d97706', '#f59e0b']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 0 }}
+                style={styles.modalPrimary}
+              >
+                <TouchableOpacity onPress={guardarCotizacion} activeOpacity={0.85} disabled={guardandoCotizacion}>
+                  <Text style={[styles.modalPrimaryText, { fontFamily }]}>{guardandoCotizacion ? 'Enviando...' : 'Enviar Análisis'}</Text>
+                </TouchableOpacity>
+              </LinearGradient>
+            </View>
+          </View>
+        </View>
+      )}
+
+
+      {showTareasModal && (
+        <View style={[styles.modalOverlay, isMobile && styles.modalOverlayMobile]}>
+          <View style={[styles.largeModal, isMobile && styles.largeModalMobile]}>
+            <View style={[styles.largeModalHeader, isMobile && styles.largeModalHeaderMobile]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: isMobile ? 8 : 12, flex: 1 }}>
+                <View style={{ backgroundColor: '#1e40af', borderRadius: 12, padding: isMobile ? 8 : 10 }}>
+                  <Ionicons name="checkmark-circle-outline" size={isMobile ? 20 : 24} color="#3b82f6" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.largeModalTitle, isMobile && styles.largeModalTitleMobile, { fontFamily }]} numberOfLines={1}>Mis Tareas</Text>
+                  <Text style={[styles.largeModalSubtitle, isMobile && styles.largeModalSubtitleMobile, { fontFamily }]} numberOfLines={1}>Tareas asignadas pendientes de completar</Text>
+                </View>
+              </View>
+              <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+                <TouchableOpacity onPress={cargarTareas} style={styles.refreshButton} activeOpacity={0.7}>
+                  <Text style={[styles.refreshText, { fontFamily }]}>Actualizar</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setShowTareasModal(false)} activeOpacity={0.7}>
+                  <Ionicons name="close" size={isMobile ? 20 : 24} color="#94a3b8" />
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {loadingTareas ? (
+              <View style={{ alignItems: 'center', paddingVertical: 40 }}>
+                <Text style={[{ color: '#cbd5e1', fontSize: 14 }, { fontFamily }]}>Cargando tareas...</Text>
+              </View>
+            ) : (
+              <>
+                <View style={{ paddingHorizontal: 16, marginTop: 12, marginBottom: 20 }}>
+                  <View style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    backgroundColor: '#111827',
+                    borderRadius: 12,
+                    paddingHorizontal: 12,
+                    borderWidth: 1,
+                    borderColor: '#374151'
+                  }}>
+                    <Ionicons name="search-outline" size={18} color="#64748b" />
+                    <TextInput
+                      style={{
+                        flex: 1,
+                        color: 'white',
+                        paddingVertical: 10,
+                        paddingHorizontal: 10,
+                        fontFamily,
+                        fontSize: 14
+                      }}
+                      placeholder="Buscar por descripción..."
+                      placeholderTextColor="#64748b"
+                      value={searchQuery}
+                      onChangeText={setSearchQuery}
+                    />
+                    {searchQuery.length > 0 && (
+                      <TouchableOpacity onPress={() => setSearchQuery('')}>
+                        <Ionicons name="close-circle" size={18} color="#64748b" />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                </View>
+
+                {tareasFiltradas.length === 0 ? (
+                  <View style={{ alignItems: 'center', paddingVertical: 40 }}>
+                    <Ionicons name="checkmark-done" size={56} color="#10b981" style={{ marginBottom: 16, opacity: 0.6 }} />
+                    <Text style={[{ color: '#cbd5e1', fontSize: 15, textAlign: 'center', fontWeight: '600' }, { fontFamily }]}>
+                      {searchQuery ? 'No se encontraron tareas' : 'No tienes tareas asignadas'}
+                    </Text>
+                  </View>
+                ) : (
+                  <ScrollView style={[styles.modalList, isMobile && styles.modalListMobile]} showsVerticalScrollIndicator={false}>
+                    {tareasFiltradas.map((tarea: any, index: number) => {
+                      const estadoColor =
+                        tarea.estado === 'pendiente'
+                          ? '#f59e0b'
+                          : tarea.estado === 'en_proceso'
+                            ? '#3b82f6'
+                            : '#10b981';
+
+                      return (
+                        <View key={index} style={[
+                          styles.cardContainer,
+                          isMobile && styles.cardContainerMobile,
+                          {
+                            flexDirection: 'column',
+                            backgroundColor: '#1e293b',
+                            borderColor: '#334155',
+                            borderWidth: 1,
+                            borderRadius: 12,
+                            padding: 16,
+                            marginBottom: 12,
+                            shadowColor: '#000',
+                            shadowOpacity: 0.2,
+                            shadowOffset: { width: 0, height: 2 },
+                            shadowRadius: 4,
+                          }
+                        ]}>
+                          <View style={{ flex: 1 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8 }}>
+                              <View style={{ flexDirection: 'row', alignItems: 'flex-start', flex: 1, paddingRight: 8 }}>
+                                <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: estadoColor, marginRight: 10, marginTop: 6 }} />
+                                <Text style={[{ color: '#f8fafc', fontSize: 15, fontWeight: '700', flex: 1 }, { fontFamily }]} numberOfLines={1}>{tarea.descripcion}</Text>
+                              </View>
+                              <TouchableOpacity
+                                onPress={() => {
+                                  setTareaSeleccionada(tarea);
+                                  setShowTareasModal(false);
+                                  setShowTareaDetalle(true);
+                                }}
+                                activeOpacity={0.7}
+                                style={{ padding: 4 }}
+                              >
+                                <Ionicons name="eye-outline" size={20} color="#94a3b8" />
+                              </TouchableOpacity>
+                            </View>
+
+                            <Text style={[{ color: '#94a3b8', fontSize: 13, marginBottom: 16, marginLeft: 18, lineHeight: 18 }, { fontFamily }]} numberOfLines={2}>
+                              {tarea.descripcion}
+                            </Text>
+
+                            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginLeft: 18 }}>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                                <View style={{ flexDirection: 'row', alignItems: 'center', marginRight: 16, maxWidth: '45%' }}>
+                                  <Ionicons name="person-outline" size={12} color="#64748b" style={{ marginRight: 4 }} />
+                                  <Text style={[{ color: '#94a3b8', fontSize: 11 }, { fontFamily }]} numberOfLines={1}>{tarea.admin_nombre}</Text>
+                                </View>
+                                <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                                  <Ionicons name="calendar-outline" size={12} color="#64748b" style={{ marginRight: 4 }} />
+                                  <Text style={[{ color: '#94a3b8', fontSize: 11 }, { fontFamily }]} numberOfLines={1}>
+                                    {new Date(tarea.created_at).toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' })}
+                                  </Text>
+                                </View>
+                              </View>
+
+                              <View style={{
+                                paddingHorizontal: 10,
+                                paddingVertical: 4,
+                                borderRadius: 12,
+                                borderWidth: 1,
+                                borderColor: `${estadoColor}60`,
+                                backgroundColor: 'transparent'
+                              }}>
+                                <Text style={[{ color: estadoColor, fontSize: 10, fontWeight: '700', textTransform: 'uppercase' }, { fontFamily }]}>
+                                  {tarea.estado === 'pendiente' ? 'Pendiente' : tarea.estado === 'en_proceso' ? 'En Proceso' : 'Completada'}
+                                </Text>
+                              </View>
+                            </View>
+                          </View>
+                        </View>
+                      );
+                    })}
+                  </ScrollView>
+                )}
+              </>
+            )}
+          </View>
+        </View>
+      )}
+
+      {showTareaDetalle && tareaSeleccionada && (
+        <View style={[styles.modalOverlay, isMobile && styles.modalOverlayMobile]}>
+          <View style={[styles.largeModal, isMobile && styles.largeModalMobile]}>
+            <View style={[styles.detailModalHeader, isMobile && styles.detailModalHeaderMobile]}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.detailModalTitle, isMobile && styles.detailModalTitleMobile, { fontFamily }]} numberOfLines={1}>Detalles de la tarea</Text>
+                <Text style={[styles.detailModalSubtitle, isMobile && styles.detailModalSubtitleMobile, { fontFamily }]} numberOfLines={1}>Información completa de la asignación</Text>
+              </View>
+              <TouchableOpacity onPress={() => { setShowTareaDetalle(false); setTareaSeleccionada(null); }} activeOpacity={0.7}>
+                <Ionicons name="close" size={isMobile ? 20 : 24} color="#94a3b8" />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={styles.detailScroll} showsVerticalScrollIndicator={false}>
+              <View style={[styles.detailContent, isMobile && styles.detailContentMobile]}>
+                <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile]}>
+                  <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Descripción</Text>
+                  <View style={[styles.detailValueBox, isMobile && styles.detailValueBoxMobile]}>
+                    <Text style={[styles.detailValueText, { fontFamily }]}>{tareaSeleccionada.descripcion}</Text>
+                  </View>
+                </View>
+
+                <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile]}>
+                  <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Asignada por</Text>
+                  <View style={[styles.detailValueBox, isMobile && styles.detailValueBoxMobile]}>
+                    <Text style={[styles.detailValueText, { fontFamily }]}>{tareaSeleccionada.admin_nombre}</Text>
+                    {tareaSeleccionada.admin_email && (
+                      <Text style={[styles.detailSubValue, { fontFamily }]}>{tareaSeleccionada.admin_email}</Text>
+                    )}
+                  </View>
+                </View>
+
+                <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile]}>
+                  <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Fecha de Asignación</Text>
+                  <View style={[styles.detailValueBox, isMobile && styles.detailValueBoxMobile]}>
+                    <Text style={[styles.detailValueText, { fontFamily }]}>
+                      {new Date(tareaSeleccionada.created_at).toLocaleDateString('es-ES', {
+                        day: 'numeric',
+                        month: 'long',
+                        year: 'numeric'
+                      })}
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.detailRowFields}>
+                  <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { flex: 1 }]}>
+                    <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Estado</Text>
+                    <View style={[styles.detailValueBox, isMobile && styles.detailValueBoxMobile]}>
+                      <Text style={[styles.detailValueText, { fontFamily }]}>
+                        {tareaSeleccionada.estado === 'pendiente'
+                          ? 'Pendiente'
+                          : tareaSeleccionada.estado === 'en_proceso'
+                            ? 'En Proceso'
+                            : 'Completada'}
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+              </View>
+            </ScrollView>
+
+            <View style={[styles.detailFooter, isMobile && styles.detailFooterMobile]}>
+              <TouchableOpacity
+                style={[styles.detailCloseButton, isMobile && { flex: 0, width: '100%' }]}
+                onPress={() => { setShowTareaDetalle(false); setTareaSeleccionada(null); }}
+                activeOpacity={0.7}
+              >
+                <Text style={[styles.detailCloseButtonText, { fontFamily }]}>Cerrar</Text>
+              </TouchableOpacity>
+
+              {tareaSeleccionada.estado !== 'completada' && (
+                <LinearGradient
+                  colors={['#059669', '#10b981']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={[styles.detailActionButton, {
+                    borderRadius: 14,
+                    shadowColor: '#10b981',
+                    shadowOffset: { width: 0, height: 4 },
+                    shadowOpacity: 0.4,
+                    shadowRadius: 8,
+                    elevation: 5,
+                    borderWidth: 1,
+                    borderColor: 'rgba(52, 211, 153, 0.4)'
+                  }, isMobile && { flex: 0, width: '100%' }]}
+                >
+                  <TouchableOpacity
+                    onPress={marcarComoCompletada}
+                    disabled={actualizandoTarea}
+                    activeOpacity={0.85}
+                    style={{ justifyContent: 'center', alignItems: 'center', flexDirection: 'row', gap: 6, paddingVertical: 14, minHeight: 48 }}
+                  >
+                    {!actualizandoTarea && <Ionicons name="checkmark-circle" size={18} color="#fff" />}
+                    <Text style={[styles.detailActionButtonText, { fontFamily, fontSize: 14, fontWeight: '700' }]}>
+                      {actualizandoTarea ? 'Actualizando...' : 'Marcar Completada'}
+                    </Text>
+                  </TouchableOpacity>
+                </LinearGradient>
+              )}
+            </View>
+          </View>
+        </View>
+      )}
+
+      {showHistorialTareasModal && (
+        <View style={[styles.modalOverlay, isMobile && styles.modalOverlayMobile]}>
+          <View style={[styles.largeModal, isMobile && styles.largeModalMobile]}>
+            <View style={[styles.largeModalHeader, isMobile && styles.largeModalHeaderMobile]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: isMobile ? 8 : 12, flex: 1 }}>
+                <View style={{ backgroundColor: '#047857', borderRadius: 12, padding: isMobile ? 8 : 10 }}>
+                  <Ionicons name="archive-outline" size={isMobile ? 20 : 24} color="#10b981" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.largeModalTitle, isMobile && styles.largeModalTitleMobile, { fontFamily }]} numberOfLines={1}>Historial de Tareas</Text>
+                  <Text style={[styles.largeModalSubtitle, isMobile && styles.largeModalSubtitleMobile, { fontFamily }]} numberOfLines={1}>Tareas completadas exitosamente</Text>
+                </View>
+              </View>
+              <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+                <TouchableOpacity onPress={cargarTareasTerminadas} style={styles.refreshButton} activeOpacity={0.7}>
+                  <Text style={[styles.refreshText, { fontFamily }]}>Actualizar</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setShowHistorialTareasModal(false)} activeOpacity={0.7}>
+                  <Ionicons name="close" size={isMobile ? 20 : 24} color="#94a3b8" />
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {loadingHistorialTareas ? (
+              <View style={{ alignItems: 'center', paddingVertical: 40 }}>
+                <Text style={[{ color: '#cbd5e1', fontSize: 14 }, { fontFamily }]}>Cargando historial...</Text>
+              </View>
+            ) : (
+              <>
+                <View style={{ paddingHorizontal: 16, marginTop: 12, marginBottom: 20 }}>
+                  <View style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    backgroundColor: '#111827',
+                    borderRadius: 12,
+                    paddingHorizontal: 12,
+                    borderWidth: 1,
+                    borderColor: '#374151'
+                  }}>
+                    <Ionicons name="search-outline" size={18} color="#64748b" />
+                    <TextInput
+                      style={{
+                        flex: 1,
+                        color: 'white',
+                        paddingVertical: 10,
+                        paddingHorizontal: 10,
+                        fontFamily,
+                        fontSize: 14
+                      }}
+                      placeholder="Buscar por descripción..."
+                      placeholderTextColor="#64748b"
+                      value={searchQuery}
+                      onChangeText={setSearchQuery}
+                    />
+                    {searchQuery.length > 0 && (
+                      <TouchableOpacity onPress={() => setSearchQuery('')}>
+                        <Ionicons name="close-circle" size={18} color="#64748b" />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                </View>
+
+                {tareasTerminadasFiltradas.length === 0 ? (
+                  <View style={{ alignItems: 'center', paddingVertical: 40 }}>
+                    <Ionicons name="folder-open-outline" size={56} color="#94a3b8" style={{ marginBottom: 16, opacity: 0.4 }} />
+                    <Text style={[{ color: '#cbd5e1', fontSize: 15, textAlign: 'center', fontWeight: '600' }, { fontFamily }]}>
+                      {searchQuery ? 'No se encontraron tareas completadas' : 'No hay tareas completadas'}
+                    </Text>
+                  </View>
+                ) : (
+                  <ScrollView style={[styles.modalList, isMobile && styles.modalListMobile]} showsVerticalScrollIndicator={false}>
+                    {tareasTerminadasFiltradas.map((tarea: any, index: number) => (
+                      <View key={index} style={[styles.cardContainer, isMobile && styles.cardContainerMobile]}>
+                        <View style={[styles.cardAccentLeft, { backgroundColor: '#10b981' }]} />
+                        <View style={[styles.cardContent, isMobile && styles.cardContentMobile]}>
+                          <View style={styles.cardHeader}>
+                            <View style={{ flex: 1 }}>
+                              <Text style={[styles.cardMainTitle, { fontFamily }]} numberOfLines={1}>{tarea.descripcion}</Text>
+                              <Text style={[styles.cardUserInfo, { fontFamily }]} numberOfLines={1}>Asignada por: {tarea.admin_nombre}</Text>
+                            </View>
+                            <TouchableOpacity
+                              onPress={() => {
+                                setTareaSeleccionada(tarea);
+                                setShowHistorialTareasModal(false);
+                                setShowTareaDetalle(true);
+                              }}
+                              activeOpacity={0.7}
+                              style={styles.cardEyeButton}
+                            >
+                              <Ionicons name="eye-outline" size={22} color="#64748b" />
+                            </TouchableOpacity>
+                          </View>
+                          <Text style={[styles.cardDescription, { fontFamily }]} numberOfLines={2}>{tarea.descripcion}</Text>
+                          <View style={styles.cardFooter}>
+                            <Text style={[styles.cardDate, { fontFamily }]}>
+                              {new Date(tarea.created_at).toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' })}
+                            </Text>
+                            <View style={[styles.statusBadge, { backgroundColor: '#10b98125', borderColor: '#10b98150' }]}>
+                              <Text style={[styles.statusBadgeText, { color: '#10b981', fontFamily }]}>Completada</Text>
+                            </View>
+                          </View>
+                        </View>
+                      </View>
+                    ))}
+                  </ScrollView>
+                )}
+              </>
+            )}
+          </View>
+        </View>
+      )}
+
+      {showReportesModal && (
+        <View style={[styles.modalOverlay, isMobile && styles.modalOverlayMobile]}>
+          <View style={[styles.largeModal, isMobile && styles.largeModalMobile]}>
+            <View style={[styles.largeModalHeader, isMobile && styles.largeModalHeaderMobile]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: isMobile ? 8 : 12, flex: 1 }}>
+                <View style={{ backgroundColor: '#b45309', borderRadius: 12, padding: isMobile ? 8 : 10 }}>
+                  <Ionicons name="document-text-outline" size={isMobile ? 20 : 24} color="#d97706" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.largeModalTitle, isMobile && styles.largeModalTitleMobile, { fontFamily }]} numberOfLines={1}>Mis Reportes Asignados</Text>
+                  <Text style={[styles.largeModalSubtitle, isMobile && styles.largeModalSubtitleMobile, { fontFamily }]} numberOfLines={1}>Reportes en progreso asignados a ti</Text>
+                </View>
+              </View>
+              <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+                <TouchableOpacity onPress={cargarReportes} style={styles.refreshButton} activeOpacity={0.7}>
+                  <Text style={[styles.refreshText, { fontFamily }]}>Actualizar</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setShowReportesModal(false)} activeOpacity={0.7}>
+                  <Ionicons name="close" size={isMobile ? 20 : 24} color="#94a3b8" />
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {loadingReportes ? (
+              <View style={{ alignItems: 'center', paddingVertical: 40 }}>
+                <Text style={[{ color: '#cbd5e1', fontSize: 14 }, { fontFamily }]}>Cargando reportes...</Text>
+              </View>
+            ) : (
+              <View style={{ flexShrink: 1, width: '100%' }}>
+                {/* Filtros */}
+                <View style={[styles.filtrosContainer, isMobile && styles.filtrosContainerMobile]}>
+                  <TouchableOpacity
+                    style={styles.filtrosHeader}
+                    onPress={() => setMostrarFiltros(!mostrarFiltros)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.filtrosHeaderLeft}>
+                      <Ionicons name="filter-outline" size={18} color="#22d3ee" />
+                      <Text style={[styles.filtrosTitle, { fontFamily }]}>Filtros</Text>
+                      {(filtrosEstado.length > 0 || filtrosPrioridad.length > 0 || filtroID.length > 0 || filtroFecha.length > 0 || filtroCliente.length > 0 || searchQuery.length > 0) && (
+                        <View style={styles.filtrosActiveBadge}>
+                          <Text style={[styles.filtrosActiveBadgeText, { fontFamily }]}>
+                            {[filtrosEstado.length > 0, filtrosPrioridad.length > 0, filtroID.length > 0, filtroFecha.length > 0, filtroCliente.length > 0, searchQuery.length > 0].filter(Boolean).length}
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                      {(filtrosEstado.length > 0 || filtrosPrioridad.length > 0 || filtroID.length > 0 || filtroFecha.length > 0 || filtroCliente.length > 0 || searchQuery.length > 0) && (
+                        <TouchableOpacity onPress={() => { setFiltrosEstado([]); setFiltrosPrioridad([]); setFiltroID(''); setFiltroFecha(''); setFiltroCliente(''); setSearchQuery(''); }} style={styles.limpiarFiltrosButtonSmall}>
+                          <Ionicons name="close-circle" size={16} color="#f87171" />
+                          <Text style={[styles.limpiarFiltrosTextSmall, { fontFamily }]}>Limpiar</Text>
+                        </TouchableOpacity>
+                      )}
+                      <Ionicons name={mostrarFiltros ? "chevron-up" : "chevron-down"} size={24} color="#22d3ee" />
+                    </View>
+                  </TouchableOpacity>
+
+                  {mostrarFiltros && (
+                    <>
+                      {/* Chips Estado */}
+                      <View style={[styles.filtroSection, isMobile && { gap: 6, paddingHorizontal: 14, paddingBottom: 12 }]}>
+                        <Text style={[styles.filtroLabel, { fontFamily }, isMobile && { fontSize: 11 }]}>
+                          <Ionicons name="flag-outline" size={isMobile ? 12 : 14} color="#94a3b8" /> Estado
+                        </Text>
+                        <View style={styles.filtroChips}>
+                          {[
+                            { value: 'en_espera', label: 'En espera', icon: 'time-outline', color: '#f59e0b' },
+                            { value: 'asignado', label: 'Asignado', icon: 'person-add-outline', color: '#06b6d4' },
+                            { value: 'en_cotizacion', label: 'En cotización', icon: 'calculator-outline', color: '#8b5cf6' },
+                            { value: 'en_ejecucion', label: 'En ejecución', icon: 'construct-outline', color: '#3b82f6' },
+                          ].map((estado) => {
+                            const isActive = filtrosEstado.includes(estado.value);
+                            return (
+                              <TouchableOpacity
+                                key={estado.value}
+                                onPress={() => setFiltrosEstado(prev => isActive ? prev.filter(f => f !== estado.value) : [...prev, estado.value])}
+                                style={[styles.filtroChip, isActive && { ...styles.filtroChipActive, borderColor: estado.color }, isMobile && { paddingHorizontal: 6, paddingVertical: 4 }]}
+                              >
+                                <Ionicons name={estado.icon as any} size={isMobile ? 12 : 14} color={isActive ? estado.color : '#94a3b8'} />
+                                <Text style={[styles.filtroChipText, { fontFamily }, isMobile && { fontSize: 10 }, isActive && { ...styles.filtroChipTextActive, color: estado.color }]}>
+                                  {estado.label}
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </View>
+                      </View>
+
+                      {/* Chips Prioridad */}
+                      <View style={[styles.filtroSection, isMobile && { gap: 6, paddingHorizontal: 14, paddingBottom: 12 }]}>
+                        <Text style={[styles.filtroLabel, { fontFamily }, isMobile && { fontSize: 11 }]}>
+                          <Ionicons name="alert-circle-outline" size={isMobile ? 12 : 14} color="#94a3b8" /> Prioridad
+                        </Text>
+                        <View style={styles.filtroChips}>
+                          {[
+                            { value: 'baja', label: 'Baja', icon: 'chevron-down-outline', color: '#10b981' },
+                            { value: 'media', label: 'Media', icon: 'remove-outline', color: '#f59e0b' },
+                            { value: 'alta', label: 'Urgente', icon: 'chevron-up-outline', color: '#ef4444' },
+                          ].map((prioridad) => {
+                            const isActive = filtrosPrioridad.includes(prioridad.value);
+                            return (
+                              <TouchableOpacity
+                                key={prioridad.value}
+                                onPress={() => setFiltrosPrioridad(prev => isActive ? prev.filter(f => f !== prioridad.value) : [...prev, prioridad.value])}
+                                style={[styles.filtroChip, isActive && { ...styles.filtroChipActive, borderColor: prioridad.color }, isMobile && { paddingHorizontal: 6, paddingVertical: 4 }]}
+                              >
+                                <Ionicons name={prioridad.icon as any} size={isMobile ? 12 : 14} color={isActive ? prioridad.color : '#94a3b8'} />
+                                <Text style={[styles.filtroChipText, { fontFamily }, isMobile && { fontSize: 10 }, isActive && { ...styles.filtroChipTextActive, color: prioridad.color }]}>
+                                  {prioridad.label}
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </View>
+                      </View>
+
+                      {/* Fila 1: Buscar por Equipo + Buscar por Cliente */}
+                      <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? 0 : 12, marginBottom: isMobile ? 0 : 8 }}>
+                        <View style={[styles.searchFilterContainerPro, isMobile ? styles.searchFilterContainerMobile : { flex: 1, marginBottom: 0 }]}>
+                          {!isMobile && (
+                            <View style={[styles.searchFilterLabelPro, isMobile && { marginBottom: 4 }]}>
+                              <Text style={[styles.searchFilterLabelText, { fontFamily }, isMobile && { fontSize: 10 }]}>Buscar por Equipo / Servicio</Text>
+                            </View>
+                          )}
+                          <View style={[
+                            styles.searchFilterInputWrapperPro,
+                            searchQuery.length > 0 && styles.searchFilterInputWrapperFocused,
+                            isMobile && { height: 36, backgroundColor: 'rgba(15, 23, 42, 0.4)' }
+                          ]}>
+                            <Ionicons name="search-outline" size={isMobile ? 14 : 18} color={searchQuery.length > 0 ? '#06b6d4' : '#64748b'} />
+                            <TextInput
+                              style={[styles.searchInputPro, { fontFamily, paddingVertical: isMobile ? 4 : 8 }, isMobile && { fontSize: 13 }]}
+                              placeholder={isMobile ? 'Equipo o servicio' : 'Nombre o descripción...'}
+                              placeholderTextColor="#64748b"
+                              value={searchQuery}
+                              onChangeText={setSearchQuery}
+                            />
+                            {searchQuery.length > 0 && (
+                              <TouchableOpacity onPress={() => setSearchQuery('')}>
+                                <Ionicons name="close-circle" size={isMobile ? 16 : 20} color="#64748b" />
+                              </TouchableOpacity>
+                            )}
+                          </View>
+                        </View>
+
+                        <View style={[styles.searchFilterContainerPro, isMobile ? styles.searchFilterContainerMobile : { flex: 1, marginBottom: 0 }]}>
+                          {!isMobile && (
+                            <View style={[styles.searchFilterLabelPro, isMobile && { marginBottom: 4 }]}>
+                              <Text style={[styles.searchFilterLabelText, { fontFamily }, isMobile && { fontSize: 10 }]}>Buscar por Cliente / Empresa</Text>
+                            </View>
+                          )}
+                          <View style={[
+                            styles.searchFilterInputWrapperPro,
+                            filtroCliente.length > 0 && styles.searchFilterInputWrapperFocused,
+                            isMobile && { height: 36, backgroundColor: 'rgba(15, 23, 42, 0.4)' }
+                          ]}>
+                            <Ionicons name="person-outline" size={isMobile ? 14 : 18} color={filtroCliente.length > 0 ? '#06b6d4' : '#64748b'} />
+                            <TextInput
+                              style={[styles.searchInputPro, { fontFamily, paddingVertical: isMobile ? 4 : 8 }, isMobile && { fontSize: 13 }]}
+                              placeholder={isMobile ? 'Cliente o empresa' : 'Nombre o empresa...'}
+                              placeholderTextColor="#64748b"
+                              value={filtroCliente}
+                              onChangeText={setFiltroCliente}
+                            />
+                            {filtroCliente.length > 0 && (
+                              <TouchableOpacity onPress={() => setFiltroCliente('')}>
+                                <Ionicons name="close-circle" size={isMobile ? 16 : 20} color="#64748b" />
+                              </TouchableOpacity>
+                            )}
+                          </View>
+                        </View>
+                      </View>
+
+                      {/* Fila 2: ID + Fecha */}
+                      <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? 0 : 12, marginBottom: isMobile ? 8 : 0 }}>
+                        <View style={[styles.searchFilterContainerPro, isMobile ? styles.searchFilterContainerMobile : { flex: 1, marginBottom: 0 }]}>
+                          {!isMobile && (
+                            <View style={[styles.searchFilterLabelPro, isMobile && { marginBottom: 4 }]}>
+                              <Text style={[styles.searchFilterLabelText, { fontFamily }, isMobile && { fontSize: 10 }]}>ID</Text>
+                            </View>
+                          )}
+                          <View style={[
+                            styles.searchFilterInputWrapperPro,
+                            filtroID.length > 0 && styles.searchFilterInputWrapperFocused,
+                            isMobile && { height: 36, backgroundColor: 'rgba(15, 23, 42, 0.4)' }
+                          ]}>
+                            <TextInput
+                              style={[styles.searchInputPro, { fontFamily, paddingVertical: isMobile ? 4 : 8 }, isMobile && { fontSize: 13 }]}
+                              placeholder="ID..."
+                              placeholderTextColor="#64748b"
+                              value={filtroID}
+                              onChangeText={setFiltroID}
+                            />
+                            {filtroID.length > 0 && (
+                              <TouchableOpacity onPress={() => setFiltroID('')}>
+                                <Ionicons name="close-circle" size={isMobile ? 16 : 20} color="#64748b" />
+                              </TouchableOpacity>
+                            )}
+                          </View>
+                        </View>
+
+                        <View style={[styles.searchFilterContainerPro, isMobile ? styles.searchFilterContainerMobile : { flex: 1, marginBottom: 0 }]}>
+                          {!isMobile && (
+                            <View style={[styles.searchFilterLabelPro, isMobile && { marginBottom: 4 }]}>
+                              <Text style={[styles.searchFilterLabelText, { fontFamily }, isMobile && { fontSize: 10 }]}>Fecha</Text>
+                            </View>
+                          )}
+                          <View style={[
+                            styles.searchFilterInputWrapperPro,
+                            filtroFecha.length > 0 && styles.searchFilterInputWrapperFocused,
+                            isMobile && { height: 36, backgroundColor: 'rgba(15, 23, 42, 0.4)' }
+                          ]}>
+                            <CustomDatePicker
+                              value={filtroFecha}
+                              onChange={setFiltroFecha}
+                              isMobile={isMobile}
+                              fontFamily={fontFamily}
+                            />
+                          </View>
+                        </View>
+                      </View>
+
+                      {!loadingReportes && (
+                        <View style={styles.filtrosResultados}>
+                          <Ionicons name="document-text-outline" size={14} color="#94a3b8" />
+                          <Text style={[styles.filtrosResultadosText, { fontFamily }]}>
+                            Mostrando {reportesFiltrados.length} de {listaReportes.length} reportes
+                          </Text>
+                        </View>
+                      )}
+                    </>
+                  )}
+                </View>
+
+                {reportesFiltrados.length === 0 ? (
+                  <View style={styles.noResultadosContainer || { alignItems: 'center', paddingVertical: 40 }}>
+                    <Ionicons name="search-outline" size={48} color="#475569" />
+                    <Text style={[{ color: '#94a3b8', fontSize: 15, textAlign: 'center', fontWeight: '600', marginTop: 12 }, { fontFamily }]}>
+                      {listaReportes.length === 0 ? 'No tienes reportes asignados' : 'No se encontraron resultados'}
+                    </Text>
+                    <Text style={[{ color: '#64748b', fontSize: 13, textAlign: 'center', marginTop: 8 }, { fontFamily }]}>
+                      {listaReportes.length === 0 ? '' : 'Intenta ajustar los filtros.'}
+                    </Text>
+                  </View>
+                ) : (
+                  <ScrollView style={isMobile ? { flexShrink: 1 } : styles.listScroll} showsVerticalScrollIndicator={false}>
+                    <View style={styles.listSpacing}>
+                      {reportesFiltrados.map((reporte: any) => {
+                        const badgeColor = obtenerColorEstado(reporte.estado);
+                        return (
+                          <View key={reporte.id} style={styles.reportCard}>
+                            <View style={[styles.reportHeader, isMobile && styles.reportHeaderMobile]}>
+                              <View style={styles.reportHeaderText}>
+                                <View style={{ flexDirection: isMobile ? 'column' : 'row', alignItems: isMobile ? 'flex-start' : 'center', gap: isMobile ? 4 : 8, marginBottom: 2 }}>
+                                  <Text style={[styles.reportTitle, isMobile && styles.reportTitleMobile, { fontFamily, flexShrink: 1 }]} numberOfLines={isMobile ? 2 : 1}>
+                                    {reporte.equipo_descripcion || 'Equipo / servicio'}
+                                  </Text>
+                                  <View style={{ backgroundColor: 'rgba(56, 189, 248, 0.1)', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 4, borderWidth: 1, borderColor: 'rgba(56, 189, 248, 0.2)', alignSelf: isMobile ? 'flex-start' : 'center' }}>
+                                    <Text style={{ color: '#38bdf8', fontSize: 10, fontWeight: '700', fontFamily }}>Reporte ID: {reporte.id}</Text>
+                                  </View>
+                                </View>
+                                <Text style={[styles.reportSubtitle, isMobile && styles.reportSubtitleMobile, { fontFamily }]} numberOfLines={1}>
+                                  {reporte.usuario_nombre} {reporte.usuario_apellido} · {reporte.usuario_email}
+                                </Text>
+                                <Text style={[styles.reportMeta, isMobile && styles.reportMetaMobile, { fontFamily }]} numberOfLines={1}>
+                                  {reporte.empresa || 'Sin empresa'} • {reporte.sucursal || 'Sin sucursal'}
+                                </Text>
+                              </View>
+                              <View style={[styles.reportActions, isMobile && styles.reportActionsMobile]}>
+                                <TouchableOpacity
+                                  onPress={async () => {
+                                    setReporteSeleccionado(reporte);
+                                    setShowReportesModal(false);
+                                    setShowReporteDetalle(true);
+
+                                    setSucursalImagenUrl(reporte.sucursal_imagen_url || undefined);
+                                    if (!reporte.sucursal_imagen_url && reporte.empresa_id) {
+                                      obtenerSucursalesPorEmpresa(String(reporte.empresa_id)).then(res => {
+                                        if (res.success && res.data) {
+                                          const suc = res.data.find((s: any) =>
+                                            s.nombre?.trim().toLowerCase() === reporte.sucursal?.trim().toLowerCase()
+                                          );
+                                          if (suc && suc.imagen_url) {
+                                            setSucursalImagenUrl(suc.imagen_url);
+                                          }
+                                        }
+                                      }).catch(err => console.error(err));
+                                    }
+
+                                    setCargandoArchivos(true);
+                                    const resultado = await obtenerArchivosReporteBackend(reporte.id);
+                                    if (resultado.success) {
+                                      const soloMedia = (resultado.data || []).filter((a: any) => a.tipo_archivo !== 'pdf');
+                                      setArchivosReporte(soloMedia);
+                                    }
+                                    setCargandoArchivos(false);
+                                  }}
+                                  style={styles.eyeCard}
+                                >
+                                  <Ionicons name="eye-outline" size={16} color="#06b6d4" />
+                                </TouchableOpacity>
+                                <View style={[styles.estadoBadge, { backgroundColor: `${badgeColor}25`, borderColor: `${badgeColor}50` }]}>
+                                  <Text style={[styles.estadoBadgeText, { fontFamily, color: badgeColor }]}>{obtenerNombreEstado(reporte.estado)}</Text>
+                                </View>
+                              </View>
+                            </View>
+
+                            <Text style={[styles.reportComment, { fontFamily }]} numberOfLines={2}>
+                              {reporte.comentario || ''}
+                            </Text>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  </ScrollView>
+                )}
+              </View>
+            )}
+          </View>
+        </View>
+      )}
+
+      {showReporteDetalle && reporteSeleccionado && (
+        <View style={[styles.modalOverlay, isMobile && styles.modalOverlayMobile]}>
+          <View style={[styles.largeModal, isMobile && styles.largeModalMobile]}>
+            <View style={[styles.detailModalHeader, isMobile && styles.detailModalHeaderMobile, { alignItems: 'flex-start' }]}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.detailModalTitle, isMobile && styles.detailModalTitleMobile, { fontFamily }]} numberOfLines={1}>Detalles del reporte</Text>
+                <Text style={[styles.detailModalSubtitle, isMobile && styles.detailModalSubtitleMobile, { fontFamily }]} numberOfLines={1}>Resumen completo del ticket</Text>
+              </View>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                {(reporteSeleccionado.estado === 'asignado' || reporteSeleccionado.estado === 'pendiente' || (reporteSeleccionado.estado === 'en_proceso' && !reporteSeleccionado.analisis_general)) && (
+                  <TouchableOpacity
+                    onPress={() => {
+                      setShowReporteDetalle(false);
+                      setDescripcionTrabajo('');
+                      setReparacion('');
+                      setMaterialesRefacciones('');
+                      setRecomendaciones('');
+                      setRecomendacionesAdicionales('');
+                      setFotosRevisionUris([]);
+                      setFotosPostprocesoUris([]);
+                      setShowExpressModal(true);
+                    }}
+                    activeOpacity={0.85}
+                    style={{
+                      backgroundColor: '#ef4444',
+                      paddingHorizontal: isMobile ? 8 : 12,
+                      paddingVertical: isMobile ? 6 : 8,
+                      borderRadius: 8,
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: 4
+                    }}
+                  >
+                    <Ionicons name="flash" size={14} color="#fff" />
+                    <Text style={[{ color: '#fff', fontSize: isMobile ? 11 : 13, fontWeight: 'bold', fontFamily }]}>
+                      CSC
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                <TouchableOpacity onPress={() => cerrarModalReporteDetalle()} activeOpacity={0.7} style={{ padding: 4 }}>
+                  <Ionicons name="close" size={isMobile ? 20 : 26} color="#94a3b8" />
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Aviso prominente cuando el cliente aceptó la cotización */}
+            {reporteSeleccionado.estado === 'aceptado_por_cliente' && !(reporteSeleccionado.revision || reporteSeleccionado.reparacion) && (
+              <View style={{
+                backgroundColor: 'rgba(16, 185, 129, 0.15)',
+                borderBottomWidth: 3,
+                borderBottomColor: '#10b981',
+                padding: 16,
+                marginHorizontal: isMobile ? 16 : 24,
+                marginTop: 12,
+                borderRadius: 12
+              }}>
+                <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center' }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[{ fontSize: 15, fontWeight: '800', color: '#10b981', marginBottom: 4 }, { fontFamily }]}>
+                      Cliente aceptó la cotización
+                    </Text>
+                    <Text style={[{ fontSize: 13, color: '#6ee7b7', lineHeight: 18 }, { fontFamily }]}>
+                      Ahora puedes completar los campos de Revisión, Recomendaciones y Reparación abajo.
+                    </Text>
+                  </View>
+                </View>
+              </View>
+            )}
+
+            <ScrollView style={styles.detailScroll} showsVerticalScrollIndicator={false}>
+              <View style={[styles.detailContent, isMobile && styles.detailContentMobile]}>
+                <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile]}>
+                  <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Equipo / Servicio</Text>
+                  <View style={[styles.detailValueBox, isMobile && styles.detailValueBoxMobile]}>
+                    <Text style={[styles.detailValueText, { fontFamily }]}>{reporteSeleccionado.equipo_descripcion}</Text>
+                  </View>
+                </View>
+
+                <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile]}>
+                  <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Solicitante</Text>
+                  <View style={[styles.detailValueBox, isMobile && styles.detailValueBoxMobile]}>
+                    <Text style={[styles.detailValueText, { fontFamily }]}>{reporteSeleccionado.usuario_nombre}</Text>
+                  </View>
+                </View>
+
+                {reporteSeleccionado.empresa && (
+                  <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile]}>
+                    <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Empresa</Text>
+                    <View style={[styles.detailValueBox, isMobile && styles.detailValueBoxMobile]}>
+                      <Text style={[styles.detailValueText, { fontFamily }]}>{reporteSeleccionado.empresa}</Text>
+                    </View>
+                  </View>
+                )}
+
+                {reporteSeleccionado.sucursal && (
+                  <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile]}>
+                    <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Sucursal</Text>
+                    <View style={[styles.detailValueBox, isMobile && styles.detailValueBoxMobile]}>
+                      <Text style={[styles.detailValueText, { fontFamily }]}>{reporteSeleccionado.sucursal}</Text>
+                    </View>
+                  </View>
+                )}
+
+                {sucursalImagenUrl && (
+                  <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile]}>
+                    <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Imagen de la Sucursal</Text>
+                    <TouchableOpacity
+                      activeOpacity={0.8}
+                      onPress={() => {
+                        setArchivoVisualizando({ tipo_archivo: 'imagen', url: getProxyUrl(sucursalImagenUrl) });
+                        setShowArchivoModal(true);
+                      }}
+                      style={{
+                        borderRadius: 12, overflow: 'hidden', borderWidth: 1,
+                        borderColor: '#1e293b', backgroundColor: '#0f172a',
+                      }}>
+                      <Image
+                        source={{ uri: getProxyUrl(sucursalImagenUrl) }}
+                        style={{ width: '100%', height: isMobile ? 180 : 220, borderRadius: 12 }}
+                        resizeMode="cover"
+                      />
+                    </TouchableOpacity>
+                  </View>
+                )}
+
+                <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile]}>
+                  <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Comentario / Problema</Text>
+                  <View style={[styles.detailValueBox, isMobile && styles.detailValueBoxMobile]}>
+                    <Text style={[styles.detailValueText, { fontFamily }]}>{reporteSeleccionado.comentario || 'Sin comentarios'}</Text>
+                  </View>
+                </View>
+
+                <View style={styles.detailRowFields}>
+                  <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { flex: 1 }]}>
+                    <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Prioridad</Text>
+                    <View style={[styles.detailValueBox, isMobile && styles.detailValueBoxMobile]}>
+                      <Text style={[styles.detailValueText, { fontFamily }]}>
+                        {reporteSeleccionado.prioridad || 'Media'}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { flex: 1 }]}>
+                    <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Estado</Text>
+                    <View style={[styles.detailValueBox, isMobile && styles.detailValueBoxMobile]}>
+                      <Text style={[styles.detailValueText, { fontFamily }]}>
+                        {obtenerNombreEstado(reporteSeleccionado.estado)}
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+
+                {/* Sección de Análisis para el Técnico */}
+                {reporteSeleccionado.estado === 'asignado' ? (
+                  <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginTop: 16 }]}>
+                    <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, color: '#f59e0b', fontWeight: 'bold' }]}>
+                      ANALISIS GENERAL(ESCRIBIR AQUI LA INFORMACION MPORTANTE Y NECESARIA)
+                    </Text>
+                    <TextInput
+                      style={[styles.textInputArea, isMobile && styles.textInputAreaMobile, { fontFamily, minHeight: 100 }]}
+                      placeholder="Reporta aquí qué partes del equipo no están funcionando o qué análisis realizaste..."
+                      placeholderTextColor="#94a3b8"
+                      multiline
+                      numberOfLines={4}
+                      value={descripcionTrabajo}
+                      onChangeText={setDescripcionTrabajo}
+                      textAlignVertical="top"
+                    />
+
+                    {/* Sección de Nota de Voz */}
+                    <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, marginTop: 16 }]}>
+                      NOTA DE VOZ EXPLICATIVA(BREVE RETROALIMENTACION AL ADMINISTRADOR)
+                    </Text>
+
+                    <View style={styles.audioControlsContainer}>
+                      {!audioUri && !isRecording ? (
+                        <TouchableOpacity
+                          style={styles.audioRecordButton}
+                          onPress={startRecording}
+                          activeOpacity={0.7}
+                        >
+                          <Ionicons name="mic" size={24} color="#fff" />
+                          <Text style={[styles.audioButtonText, { fontFamily }]}>Grabar Nota</Text>
+                        </TouchableOpacity>
+                      ) : isRecording ? (
+                        <View style={styles.recordingStatusContainer}>
+                          <View style={styles.recordingPulse} />
+                          <Text style={[styles.recordingTime, { fontFamily }]}>{formatDuration(recordingDuration)}</Text>
+                          <TouchableOpacity
+                            style={styles.audioStopButton}
+                            onPress={stopRecording}
+                            activeOpacity={0.7}
+                          >
+                            <Ionicons name="stop" size={20} color="#fff" />
+                            <Text style={[styles.audioButtonText, { fontFamily }]}>Detener</Text>
+                          </TouchableOpacity>
+                        </View>
+                      ) : (
+                        <View style={styles.audioPlayerContainer}>
+                          <TouchableOpacity
+                            style={styles.audioPlayButton}
+                            onPress={playPauseAudio}
+                            activeOpacity={0.7}
+                          >
+                            <Ionicons name={isPlaying ? "pause" : "play"} size={24} color="#fff" />
+                          </TouchableOpacity>
+
+                          <View style={styles.audioInfoContainer}>
+                            <Text style={[styles.audioTitle, { fontFamily }]}>Nota grabada</Text>
+                            <Text style={[styles.audioDuration, { fontFamily }]}>{formatDuration(recordingDuration)}</Text>
+                          </View>
+
+                          <TouchableOpacity
+                            style={styles.audioDeleteButton}
+                            onPress={deleteRecording}
+                            activeOpacity={0.7}
+                          >
+                            <Ionicons name="trash-outline" size={20} color="#ef4444" />
+                          </TouchableOpacity>
+                        </View>
+                      )}
+                    </View>
+
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}>
+                      <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, marginTop: 0 }]}>
+                        IMÁGENES DE ANÁLISIS
+                      </Text>
+                      {fotosRevisionUris.length > 0 && (
+                        <TouchableOpacity onPress={limpiarFotosRevision} activeOpacity={0.7} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                          <Ionicons name="trash-outline" size={14} color="#ef4444" />
+                          <Text style={{ color: '#ef4444', fontSize: 12, fontWeight: '600', fontFamily }}>Limpiar todo</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+
+                    <View style={{ marginTop: 8 }}>
+                      {/* Galería de fotos capturadas */}
+                      {fotosRevisionUris.length > 0 && (
+                        <ScrollView
+                          horizontal
+                          showsHorizontalScrollIndicator={true}
+                          style={{ marginBottom: 12 }}
+                          contentContainerStyle={{ paddingRight: 20 }}
+                        >
+                          {fotosRevisionUris.map((uri, index) => (
+                            <View key={index} style={{ marginRight: 12, position: 'relative' }}>
+                              <Image source={{ uri }} style={{ width: 75, height: 75, borderRadius: 8 }} />
+                              <TouchableOpacity
+                                style={{
+                                  position: 'absolute',
+                                  top: -5,
+                                  right: -5,
+                                  backgroundColor: 'rgba(239, 68, 68, 0.9)',
+                                  borderRadius: 12,
+                                  padding: 2,
+                                  zIndex: 1
+                                }}
+                                onPress={() => eliminarFotoRevision(index)}
+                              >
+                                <Ionicons name="close" size={14} color="#fff" />
+                              </TouchableOpacity>
+                            </View>
+                          ))}
+                        </ScrollView>
+                      )}
+
+                      {/* Botón para tomar foto */}
+                      <TouchableOpacity
+                        onPress={seleccionarFotoRevision}
+                        onDragOver={handleDragOver}
+                        onDrop={handleDrop}
+                        activeOpacity={0.8}
+                        style={styles.modernDropzone}
+                      >
+                        <View style={{ width: 56, height: 56, backgroundColor: 'rgba(56, 189, 248, 0.1)', borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginBottom: 12 }}>
+                          <Ionicons name="images-outline" size={32} color="#0ea5e9" />
+                        </View>
+                        <Text style={[styles.proActionTitle, { fontFamily, color: '#e0f2fe' }]}>
+                          {fotosRevisionUris.length === 0 ? 'Selecciona imágenes para subir' : `Imágenes seleccionadas: ${fotosRevisionUris.length}`}
+                        </Text>
+                        <Text style={[styles.proActionSubtitle, { fontFamily, color: '#7dd3fc', opacity: 0.8 }]}>
+                          Selecciona imágenes del trabajo realizado
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ) : (reporteSeleccionado.analisis_general && (
+                  <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginTop: 16 }]}>
+                    <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, color: '#f59e0b', fontWeight: 'bold' }]}>
+                      ANÁLISIS REALIZADO
+                    </Text>
+                    <View style={[styles.detailValueBox, isMobile && styles.detailValueBoxMobile]}>
+                      <Text style={[styles.detailValueText, { fontFamily }]}>
+                        {reporteSeleccionado.analisis_general}
+                      </Text>
+                    </View>
+
+                    {/* Nueva Galería de IMAGENES DE ANALISIS (Pre-proceso) */}
+                    {archivosReporte.some(a => a.tipo_archivo === 'foto_revision') && (
+                      <View style={{ marginTop: 12 }}>
+                        <Text style={[styles.detailFieldLabel, { fontFamily, fontSize: 11, color: '#3b82f6', marginBottom: 8 }]}>
+                          IMAGENES DE ANALISIS CARGADAS
+                        </Text>
+                        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                          {archivosReporte.filter(a => a.tipo_archivo === 'foto_revision').map((archivo, idx) => {
+                            const proxyUrl = getProxyUrl(archivo.cloudflare_url);
+                            return (
+                              <TouchableOpacity
+                                key={idx}
+                                style={{ marginRight: 10 }}
+                                onPress={() => {
+                                  setArchivoVisualizando({
+                                    url: proxyUrl,
+                                    tipo_archivo: 'foto_revision',
+                                    nombre: archivo.nombre_original || 'Analisis'
+                                  });
+                                  setShowArchivoModal(true);
+                                }}
+                              >
+                                <Image
+                                  source={{ uri: proxyUrl }}
+                                  style={{ width: 80, height: 80, borderRadius: 8, borderWidth: 1, borderColor: '#3b82f6' }}
+                                />
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </ScrollView>
+                      </View>
+                    )}
+                  </View>
+                ))}
+
+                {/* Campos Fase 2 (cuando cliente aceptó: aceptado_por_cliente o cotizado, o cuando admin confirmó: finalizado_por_tecnico) */}
+                {(
+                  reporteSeleccionado.estado === 'cotizado' ||
+                  reporteSeleccionado.estado === 'aceptado_por_cliente' ||
+                  reporteSeleccionado.estado === 'finalizado_por_tecnico' ||
+                  ['terminado', 'cerrado_por_cliente', 'listo_para_encuesta', 'encuesta_satisfaccion', 'cerrado', 'resuelto'].includes(String(reporteSeleccionado.estado || '').toLowerCase()) ||
+                  !!reporteSeleccionado.reparacion ||
+                  !!reporteSeleccionado.materiales_refacciones ||
+                  !!reporteSeleccionado.recomendaciones
+                ) && (
+                  <>
+                    <View style={{ height: 1, backgroundColor: '#1f2937', marginVertical: 16 }} />
+
+                    {/* Mensaje cuando el trabajo ya fue enviado */}
+                    {reporteSeleccionado.estado === 'finalizado_por_tecnico' && (
+                      <View style={{
+                        backgroundColor: 'rgba(59, 130, 246, 0.15)',
+                        borderLeftWidth: 4,
+                        borderLeftColor: '#3b82f6',
+                        padding: 14,
+                        borderRadius: 8,
+                        marginBottom: 16
+                      }}>
+                        <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>
+                          <Ionicons name="checkmark-done-circle" size={22} color="#60a5fa" />
+                          <View style={{ flex: 1 }}>
+                            <Text style={[{ fontSize: 13, fontWeight: '700', color: '#60a5fa', marginBottom: 2 }, { fontFamily }]}>
+                              Trabajo enviado
+                            </Text>
+                            <Text style={[{ fontSize: 12, color: '#93c5fd', lineHeight: 16 }, { fontFamily }]}>
+                              El trabajo fue finalizado y está esperando confirmación del administrador.
+                            </Text>
+                          </View>
+                        </View>
+                      </View>
+                    )}
+
+                    {reporteSeleccionado.estado === 'aceptado_por_cliente' || reporteSeleccionado.estado === 'cotizado' ? (
+                      <>
+                        <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginBottom: 16 }]}>
+                          <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Reparación Realizada</Text>
+                          <TextInput
+                            style={[styles.textInputArea, isMobile && styles.textInputAreaMobile, { fontFamily }]}
+                            placeholder="Detalla lo que fue reparado..."
+                            placeholderTextColor="#cbd5e1"
+                            multiline
+                            numberOfLines={3}
+                            value={reparacion}
+                            onChangeText={setReparacion}
+                            editable={!guardandoFase2}
+                          />
+                        </View>
+
+                        <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginBottom: 16 }]}>
+                          <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldGroupMobile, { fontFamily }]}>Materiales / Refacciones</Text>
+                          <TextInput
+                            style={[styles.textInputArea, isMobile && styles.textInputAreaMobile, { fontFamily }]}
+                            placeholder="Materiales o refacciones utilizadas..."
+                            placeholderTextColor="#cbd5e1"
+                            multiline
+                            numberOfLines={2}
+                            value={materialesRefacciones}
+                            onChangeText={setMaterialesRefacciones}
+                            editable={!guardandoFase2}
+                          />
+                        </View>
+
+                        <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginBottom: 16 }]}>
+                          <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldGroupMobile, { fontFamily }]}>Recomendaciones</Text>
+                          <TextInput
+                            style={[styles.textInputArea, isMobile && styles.textInputAreaMobile, { fontFamily }]}
+                            placeholder="Recomendaciones para el cliente..."
+                            placeholderTextColor="#cbd5e1"
+                            multiline
+                            numberOfLines={3}
+                            value={recomendaciones}
+                            onChangeText={setRecomendaciones}
+                            editable={!guardandoFase2}
+                          />
+                        </View>
+
+                        <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginBottom: 16 }]}>
+                          <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldGroupMobile, { fontFamily }]}>Recomendaciones Adicionales</Text>
+                          <TextInput
+                            style={[styles.textInputArea, isMobile && styles.textInputAreaMobile, { fontFamily }]}
+                            placeholder="Recomendaciones adicionales (opcional)..."
+                            placeholderTextColor="#cbd5e1"
+                            multiline
+                            numberOfLines={2}
+                            value={recomendacionesAdicionales}
+                            onChangeText={setRecomendacionesAdicionales}
+                            editable={!guardandoFase2}
+                          />
+                        </View>
+                      </>
+                    ) : (
+                      <>
+                        {(reparacion || reporteSeleccionado.reparacion) ? (
+                          <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginBottom: 16 }]}>
+                            <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, color: '#10b981' }]}>Reparación Realizada</Text>
+                            <View style={[styles.detailValueBox, isMobile && styles.detailValueBoxMobile, { borderLeftWidth: 3, borderLeftColor: '#10b981' }]}>
+                              <Text style={[styles.detailValueText, { fontFamily }]}>
+                                {reparacion || reporteSeleccionado.reparacion}
+                              </Text>
+                            </View>
+                          </View>
+                        ) : null}
+
+                        {(materialesRefacciones || reporteSeleccionado.materiales_refacciones) ? (
+                          <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginBottom: 16 }]}>
+                            <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, color: '#10b981' }]}>Materiales / Refacciones</Text>
+                            <View style={[styles.detailValueBox, isMobile && styles.detailValueBoxMobile, { borderLeftWidth: 3, borderLeftColor: '#10b981' }]}>
+                              <Text style={[styles.detailValueText, { fontFamily }]}>
+                                {materialesRefacciones || reporteSeleccionado.materiales_refacciones}
+                              </Text>
+                            </View>
+                          </View>
+                        ) : null}
+
+                        {(recomendaciones || reporteSeleccionado.recomendaciones) ? (
+                          <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginBottom: 16 }]}>
+                            <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, color: '#f59e0b' }]}>Recomendaciones</Text>
+                            <View style={[styles.detailValueBox, isMobile && styles.detailValueBoxMobile, { borderLeftWidth: 3, borderLeftColor: '#f59e0b' }]}>
+                              <Text style={[styles.detailValueText, { fontFamily }]}>
+                                {recomendaciones || reporteSeleccionado.recomendaciones}
+                              </Text>
+                            </View>
+                          </View>
+                        ) : null}
+
+                        {(recomendacionesAdicionales || reporteSeleccionado.recomendaciones_adicionales) ? (
+                          <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginBottom: 16 }]}>
+                            <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, color: '#f59e0b' }]}>Recomendaciones Adicionales</Text>
+                            <View style={[styles.detailValueBox, isMobile && styles.detailValueBoxMobile, { borderLeftWidth: 3, borderLeftColor: '#f59e0b' }]}>
+                              <Text style={[styles.detailValueText, { fontFamily }]}>
+                                {recomendacionesAdicionales || reporteSeleccionado.recomendaciones_adicionales}
+                              </Text>
+                            </View>
+                          </View>
+                        ) : null}
+                      </>
+                    )}
+
+                    {/* Sección de IMAGENES DE FINALIZACION */}
+                    <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginTop: 16 }]}>
+                      <View style={{
+                        flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+                        marginBottom: 8
+                      }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                          <Ionicons name="camera" size={16} color="#10b981" />
+                          <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, color: '#10b981', fontWeight: 'bold', marginBottom: 0 }]}>
+                            IMÁGENES DE FINALIZACIÓN
+                          </Text>
+                        </View>
+                        {fotosPostprocesoUris.length > 0 && (
+                          <TouchableOpacity onPress={limpiarFotosPostproceso} activeOpacity={0.7} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                            <Ionicons name="trash-outline" size={14} color="#ef4444" />
+                            <Text style={{ color: '#ef4444', fontSize: 12, fontWeight: '600', fontFamily }}>Limpiar todo</Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+
+                      <View style={{ marginTop: 8 }}>
+                        {/* Galería de imágenes de finalización (LOCALES POR SUBIR) */}
+                        {fotosPostprocesoUris.length > 0 && (
+                          <ScrollView
+                            horizontal
+                            showsHorizontalScrollIndicator={true}
+                            style={{ marginBottom: 12 }}
+                            contentContainerStyle={{ paddingRight: 20 }}
+                          >
+                            {fotosPostprocesoUris.map((uri, index) => (
+                              <View key={index} style={{ marginRight: 10, position: 'relative' }}>
+                                <Image source={{ uri }} style={{ width: 75, height: 75, borderRadius: 8 }} />
+                                {(reporteSeleccionado.estado === 'aceptado_por_cliente' || reporteSeleccionado.estado === 'cotizado') && (
+                                  <TouchableOpacity
+                                    style={{
+                                      position: 'absolute',
+                                      top: -5,
+                                      right: -5,
+                                      backgroundColor: 'rgba(239, 68, 68, 0.9)',
+                                      borderRadius: 12,
+                                      padding: 2,
+                                      zIndex: 1
+                                    }}
+                                    onPress={() => eliminarFotoPostproceso(index)}
+                                    disabled={guardandoFase2}
+                                  >
+                                    <Ionicons name="close" size={14} color="#fff" />
+                                  </TouchableOpacity>
+                                )}
+                              </View>
+                            ))}
+                          </ScrollView>
+                        )}
+
+                        {/* Galería de imágenes de finalización (YA CARGADAS) */}
+                        {archivosReporte.some(a => a.tipo_archivo === 'foto' && a.nombre_original?.toLowerCase().includes('postproceso')) && (
+                          <View style={{ marginBottom: 12 }}>
+                            <Text style={{ fontFamily, fontSize: 11, color: '#10b981', marginBottom: 8 }}>
+                              IMAGENES DE FINALIZACION CARGADAS
+                            </Text>
+                            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                              {archivosReporte.filter(a => a.tipo_archivo === 'foto' && a.nombre_original?.toLowerCase().includes('postproceso')).map((archivo, idx) => {
+                                const proxyUrl = getProxyUrl(archivo.cloudflare_url);
+                                return (
+                                  <TouchableOpacity
+                                    key={idx}
+                                    style={{ marginRight: 10 }}
+                                    onPress={() => {
+                                      setArchivoVisualizando({
+                                        url: proxyUrl,
+                                        tipo_archivo: 'foto',
+                                        nombre: archivo.nombre_original || 'Finalizacion'
+                                      });
+                                      setShowArchivoModal(true);
+                                    }}
+                                  >
+                                    <Image
+                                      source={{ uri: proxyUrl }}
+                                      style={{ width: 90, height: 90, borderRadius: 8, borderWidth: 1, borderColor: '#10b981' }}
+                                    />
+                                  </TouchableOpacity>
+                                );
+                              })}
+                            </ScrollView>
+                          </View>
+                        )}
+
+                        {/* Botón para tomar imagen de finalización */}
+                        {(reporteSeleccionado.estado === 'aceptado_por_cliente' || reporteSeleccionado.estado === 'cotizado') && (
+                          <TouchableOpacity
+                            style={[styles.audioRecordButton, { backgroundColor: '#10b981', marginTop: 4 }]}
+                            onPress={seleccionarFotoPostproceso}
+                            activeOpacity={0.7}
+                            disabled={guardandoFase2}
+                          >
+                            <Ionicons name="images" size={24} color="#fff" />
+                            <Text style={[styles.audioButtonText, { fontFamily }]}>
+                              {fotosPostprocesoUris.length === 0 ? 'Elegir Imágenes de Finalización' : `Imágenes Seleccionadas: ${fotosPostprocesoUris.length} (Añadir más)`}
+                            </Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    </View>
+                  </>
+                )}
+
+                {/* Fotos y Videos - MOVIDO AL FINAL */}
+                {cargandoArchivos ? (
+                  <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginTop: 20 }]}>
+                    <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Cargando archivos...</Text>
+                  </View>
+                ) : null}
+
+                {!cargandoArchivos && archivosReporte.length > 0 && (
+                  <View style={{ width: '100%', marginTop: 20 }}>
+                    <View style={{
+                      flexDirection: 'row', alignItems: 'center', gap: 10,
+                      marginBottom: 14, paddingBottom: 10,
+                      borderBottomWidth: 1, borderBottomColor: '#1e293b',
+                    }}>
+                      <View style={{ width: 4, height: 18, borderRadius: 3, backgroundColor: '#64748b' }} />
+                      <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, fontSize: 12, fontWeight: '700', letterSpacing: 0.5 }]}>
+                        OTROS ARCHIVOS ADJUNTOS ({archivosReporte.filter(a =>
+                          a.tipo_archivo !== 'audio' &&
+                          a.tipo_archivo !== 'foto_revision' &&
+                          !(a.tipo_archivo === 'foto' && a.nombre_original?.toLowerCase().includes('postproceso'))
+                        ).length})
+                      </Text>
+                    </View>
+                    <View style={styles.archivosContainer}>
+                      {archivosReporte.filter(a =>
+                        a.tipo_archivo !== 'audio' &&
+                        a.tipo_archivo !== 'foto_revision' &&
+                        !(a.tipo_archivo === 'foto' && a.nombre_original?.toLowerCase().includes('postproceso'))
+                      ).map((archivo, idx) => {
+                        const proxyUrl = getProxyUrl(archivo.cloudflare_url);
+                        return (
+                          <TouchableOpacity
+                            key={idx}
+                            style={styles.archivoItem}
+                            onPress={() => {
+                              if (archivo.tipo_archivo === 'foto' || archivo.tipo_archivo === 'foto_revision') {
+                                setArchivoVisualizando({
+                                  url: proxyUrl,
+                                  tipo_archivo: archivo.tipo_archivo,
+                                  tipo: archivo.tipo_archivo,
+                                  nombre: archivo.nombre_original || 'Archivo'
+                                });
+                                setShowArchivoModal(true);
+                                return;
+                              }
+                              openMediaExternally(proxyUrl);
+                            }}
+                          >
+                            {archivo.tipo_archivo === 'foto' || archivo.tipo_archivo === 'foto_revision' ? (
+                              <>
+                                {(() => {
+                                  const isPost = archivo.tipo_archivo === 'foto' && archivo.nombre_original?.toLowerCase().includes('postproceso');
+                                  return (
+                                    <Image
+                                      source={{ uri: proxyUrl }}
+                                      style={[
+                                        styles.archivoThumb,
+                                        (archivo.tipo_archivo === 'foto_revision' || isPost) && { borderWidth: 2, borderColor: archivo.tipo_archivo === 'foto_revision' ? '#3b82f6' : '#10b981' }
+                                      ]}
+                                      onError={() => console.log('Error loading image:', proxyUrl)}
+                                    />
+                                  );
+                                })()}
+                                <Text style={[styles.archivoLabel, { fontFamily, marginTop: 6, color: archivo.tipo_archivo === 'foto_revision' ? '#60a5fa' : (archivo.tipo_archivo === 'foto' && archivo.nombre_original?.toLowerCase().includes('postproceso')) ? '#10b981' : '#94a3b8' }]}>
+                                  {archivo.tipo_archivo === 'foto_revision' ? '📷 Pre-proceso' : (archivo.tipo_archivo === 'foto' && archivo.nombre_original?.toLowerCase().includes('postproceso')) ? '📷 Finalización' : '📷 Foto'}
+                                </Text>
+                              </>
+                            ) : (
+                              <>
+                                <View style={styles.videoThumb}>
+                                  <Ionicons name="play-circle" size={44} color="#06b6d4" />
+                                </View>
+                                <Text style={[styles.archivoLabel, { fontFamily, marginTop: 6 }]}>🎥 Video</Text>
+                              </>
+                            )}
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </View>
+                )}
+
+              </View>
+            </ScrollView>
+
+
+            <View style={[styles.detailFooter, isMobile && { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 12, paddingVertical: 12, gap: 8, justifyContent: 'center' }]}>
+              {/* Web uses the old layout structure, Mobile uses a flat wrapped row */}
+              {!isMobile ? (
+                <>
+                  <TouchableOpacity
+                    style={styles.detailCloseButton}
+                    onPress={() => cerrarModalReporteDetalle()}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.detailCloseButtonText, { fontFamily }]}>Cerrar</Text>
+                  </TouchableOpacity>
+                  <View style={{ flexDirection: 'row', gap: 12, flex: 2 }}>
+                    {reporteSeleccionado.estado === 'aceptado_por_cliente' && (
+                      <View style={{ flexDirection: 'row', gap: 12, flex: 1 }}>
+                        {reparacion.trim().length > 0 && materialesRefacciones.trim().length > 0 && recomendaciones.trim().length > 0 && (
+                          <TouchableOpacity onPress={generarPDFBorrador} disabled={generandoPDFBorrador} activeOpacity={0.85} style={{ flex: 1, backgroundColor: '#164e63', borderRadius: 12, borderWidth: 1, borderColor: '#0891b2', justifyContent: 'center', alignItems: 'center', flexDirection: 'row', gap: 8, minHeight: 48 }}>
+                            {generandoPDFBorrador ? <ActivityIndicator color="#06b6d4" /> : <Ionicons name="document-text-outline" size={20} color="#06b6d4" />}
+                            <Text style={[styles.detailActionButtonText, { fontFamily, color: '#ecfdf5' }]}>{generandoPDFBorrador ? 'Generando...' : 'Generar PDF'}</Text>
+                          </TouchableOpacity>
+                        )}
+                        <LinearGradient colors={['#10b981', '#06b6d4']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={[styles.detailActionButton, { flex: 1 }]}>
+                          <TouchableOpacity onPress={async () => { if (!reparacion.trim() || !materialesRefacciones.trim() || !recomendaciones.trim()) { showToast('Por favor completa los campos obligatorios: Reparación, Materiales y Recomendaciones', 'warning'); return; } setShowConfirmarFinalizarModal(true); }} disabled={guardandoFase2} activeOpacity={0.85} style={{ justifyContent: 'center', alignItems: 'center', minHeight: 48, paddingVertical: 14 }}>
+                            <Text style={[styles.detailActionButtonText, { fontFamily }]}>{guardandoFase2 ? 'Enviando...' : 'Finalizar Trabajo'}</Text>
+                          </TouchableOpacity>
+                        </LinearGradient>
+                      </View>
+                    )}
+                    {reporteSeleccionado.estado === 'asignado' && (
+                      <View style={{ flexDirection: 'row', gap: 12, flex: 1 }}>
+                        {descripcionTrabajo.trim().length > 0 && (
+                          <TouchableOpacity onPress={generarPDFBorrador} disabled={generandoPDFBorrador} activeOpacity={0.85} style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, minHeight: 48, borderRadius: 14, borderWidth: 1.5, borderColor: generandoPDFBorrador ? '#334155' : '#06b6d4', backgroundColor: generandoPDFBorrador ? 'rgba(6,182,212,0.05)' : 'rgba(6,182,212,0.12)', shadowColor: '#06b6d4', shadowOffset: { width: 0, height: 2 }, shadowOpacity: generandoPDFBorrador ? 0 : 0.25, shadowRadius: 6, elevation: generandoPDFBorrador ? 0 : 3 }}>
+                            <Ionicons name={generandoPDFBorrador ? 'hourglass-outline' : 'document-text-outline'} size={18} color={generandoPDFBorrador ? '#64748b' : '#06b6d4'} />
+                            <Text style={[{ color: generandoPDFBorrador ? '#64748b' : '#06b6d4', fontWeight: '700', fontSize: 14 }, { fontFamily }]}>{generandoPDFBorrador ? 'Generando...' : 'Generar PDF'}</Text>
+                          </TouchableOpacity>
+                        )}
+                        <LinearGradient colors={['#d97706', '#f59e0b']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.detailActionButton}>
+                          <TouchableOpacity onPress={confirmarEnvioAnalisis} disabled={guardandoCotizacion} activeOpacity={0.85} style={{ justifyContent: 'center', alignItems: 'center', minHeight: 48, paddingVertical: 14 }}>
+                            <Text style={[styles.detailActionButtonText, { fontFamily }]}>{guardandoCotizacion ? 'Enviando...' : 'Enviar Análisis'}</Text>
+                          </TouchableOpacity>
+                        </LinearGradient>
+                        <TouchableOpacity style={[styles.detailCloseButton, { backgroundColor: 'rgba(239, 68, 68, 0.1)', borderColor: 'rgba(239, 68, 68, 0.3)' }]} onPress={() => { setReporteARechazar(reporteSeleccionado); setShowRechazarModal(true); setShowReporteDetalle(false); }} activeOpacity={0.7}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                            <Ionicons name="close-circle-outline" size={18} color="#ef4444" />
+                            <Text style={[styles.detailCloseButtonText, { fontFamily, color: '#ef4444' }]}>Rechazar Asignación</Text>
+                          </View>
+                        </TouchableOpacity>
+                      </View>
+                    )}
+                    {(reporteSeleccionado.estado === 'pendiente' || (reporteSeleccionado.estado === 'en_proceso' && !reporteSeleccionado.analisis_general)) && (
+                      <LinearGradient colors={['#d97706', '#f59e0b']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.detailActionButton}>
+                        <TouchableOpacity onPress={() => { setShowReporteDetalle(false); setShowCotizarModal(true); }} activeOpacity={0.85} style={{ justifyContent: 'center', alignItems: 'center', minHeight: 48, paddingVertical: 14 }}>
+                          <Text style={[styles.detailActionButtonText, { fontFamily }]}>Enviar Análisis</Text>
+                        </TouchableOpacity>
+                      </LinearGradient>
+                    )}
+                  </View>
+                </>
+              ) : (
+                /* MOBILE FLAT GRID LAYOUT */
+                <>
+                  <TouchableOpacity style={[styles.detailCloseButton, { flex: 1, minWidth: '45%' }]} onPress={() => cerrarModalReporteDetalle()} activeOpacity={0.7}>
+                    <Text style={[styles.detailCloseButtonText, { fontFamily }]}>Cerrar</Text>
+                  </TouchableOpacity>
+
+                  {reporteSeleccionado.estado === 'aceptado_por_cliente' && (
+                    <>
+                      {reparacion.trim().length > 0 && materialesRefacciones.trim().length > 0 && recomendaciones.trim().length > 0 && (
+                        <TouchableOpacity onPress={generarPDFBorrador} disabled={generandoPDFBorrador} activeOpacity={0.85} style={{ flex: 1, minWidth: '45%', backgroundColor: '#164e63', borderRadius: 12, borderWidth: 1, borderColor: '#0891b2', justifyContent: 'center', alignItems: 'center', flexDirection: 'row', gap: 8, minHeight: 48 }}>
+                          {generandoPDFBorrador ? <ActivityIndicator color="#06b6d4" /> : <Ionicons name="document-text-outline" size={20} color="#06b6d4" />}
+                          <Text style={[styles.detailActionButtonText, { fontFamily, color: '#ecfdf5', fontSize: 13 }]}>{generandoPDFBorrador ? 'Generando...' : 'Generar PDF'}</Text>
+                        </TouchableOpacity>
+                      )}
+                      <LinearGradient colors={['#10b981', '#06b6d4']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={[styles.detailActionButton, { flex: 1, minWidth: '45%' }]}>
+                        <TouchableOpacity onPress={async () => { if (!reparacion.trim() || !materialesRefacciones.trim() || !recomendaciones.trim()) { showToast('Por favor completa los campos obligatorios: Reparación, Materiales y Recomendaciones', 'warning'); return; } setShowConfirmarFinalizarModal(true); }} disabled={guardandoFase2} activeOpacity={0.85} style={{ justifyContent: 'center', alignItems: 'center', minHeight: 48, paddingVertical: 14 }}>
+                          <Text style={[styles.detailActionButtonText, { fontFamily, fontSize: 13 }]}>{guardandoFase2 ? 'Enviando...' : 'Finalizar Trabajo'}</Text>
+                        </TouchableOpacity>
+                      </LinearGradient>
+                    </>
+                  )}
+
+                  {reporteSeleccionado.estado === 'asignado' && (
+                    <>
+                      {descripcionTrabajo.trim().length > 0 && (
+                        <TouchableOpacity onPress={generarPDFBorrador} disabled={generandoPDFBorrador} activeOpacity={0.85} style={{ flex: 1, minWidth: '45%', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, minHeight: 48, borderRadius: 14, borderWidth: 1.5, borderColor: generandoPDFBorrador ? '#334155' : '#06b6d4', backgroundColor: generandoPDFBorrador ? 'rgba(6,182,212,0.05)' : 'rgba(6,182,212,0.12)' }}>
+                          <Ionicons name={generandoPDFBorrador ? 'hourglass-outline' : 'document-text-outline'} size={16} color={generandoPDFBorrador ? '#64748b' : '#06b6d4'} />
+                          <Text style={[{ color: generandoPDFBorrador ? '#64748b' : '#06b6d4', fontWeight: '700', fontSize: 12 }, { fontFamily }]}>{generandoPDFBorrador ? 'Generando...' : 'Generar PDF'}</Text>
+                        </TouchableOpacity>
+                      )}
+                      <LinearGradient colors={['#d97706', '#f59e0b']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={[styles.detailActionButton, { flex: 1, minWidth: '45%' }]}>
+                        <TouchableOpacity onPress={confirmarEnvioAnalisis} disabled={guardandoCotizacion} activeOpacity={0.85} style={{ justifyContent: 'center', alignItems: 'center', minHeight: 48, paddingVertical: 14 }}>
+                          <Text style={[styles.detailActionButtonText, { fontFamily, fontSize: 13 }]}>{guardandoCotizacion ? 'Enviando...' : 'Enviar Análisis'}</Text>
+                        </TouchableOpacity>
+                      </LinearGradient>
+                      <TouchableOpacity style={[styles.detailCloseButton, { flex: 1, minWidth: '45%', backgroundColor: 'rgba(239, 68, 68, 0.1)', borderColor: 'rgba(239, 68, 68, 0.3)' }]} onPress={() => { setReporteARechazar(reporteSeleccionado); setShowRechazarModal(true); setShowReporteDetalle(false); }} activeOpacity={0.7}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                          <Ionicons name="close-circle-outline" size={16} color="#ef4444" />
+                          <Text style={[styles.detailCloseButtonText, { fontFamily, color: '#ef4444', fontSize: 13 }]}>Rechazar Asignación</Text>
+                        </View>
+                      </TouchableOpacity>
+                    </>
+                  )}
+
+                  {(reporteSeleccionado.estado === 'pendiente' || (reporteSeleccionado.estado === 'en_proceso' && !reporteSeleccionado.analisis_general)) && (
+                    <LinearGradient colors={['#d97706', '#f59e0b']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={[styles.detailActionButton, { flex: 1, minWidth: '45%' }]}>
+                      <TouchableOpacity onPress={() => { setShowReporteDetalle(false); setShowCotizarModal(true); }} activeOpacity={0.85} style={{ justifyContent: 'center', alignItems: 'center', minHeight: 48, paddingVertical: 14 }}>
+                        <Text style={[styles.detailActionButtonText, { fontFamily, fontSize: 13 }]}>Enviar Análisis</Text>
+                      </TouchableOpacity>
+                    </LinearGradient>
+                  )}
+                </>
+              )}
+            </View>
+          </View>
+        </View >
+      )
+      }
+
+      {showHistorialReportesModal && (
+        <View style={[styles.modalOverlay, isMobile && styles.modalOverlayMobile]}>
+          <View style={[styles.largeModal, isMobile && styles.largeModalMobile]}>
+            <View style={[styles.largeModalHeader, isMobile && styles.largeModalHeaderMobile]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: isMobile ? 8 : 12, flex: 1 }}>
+                <View style={{ backgroundColor: '#047857', borderRadius: 12, padding: isMobile ? 8 : 10 }}>
+                  <Ionicons name="checkmark-done-outline" size={isMobile ? 20 : 24} color="#10b981" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.largeModalTitle, isMobile && styles.largeModalTitleMobile, { fontFamily }]}>Reportes Terminados</Text>
+                  <Text style={[styles.largeModalSubtitle, isMobile && styles.largeModalSubtitleMobile, { fontFamily }]}>Tus reportes completados</Text>
+                </View>
+              </View>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: isMobile ? 4 : 8 }}>
+                <TouchableOpacity
+                  onPress={cargarReportesTerminados}
+                  style={[styles.refreshButton, isMobile && { paddingHorizontal: 8, height: 32 }]}
+                >
+                  <Text style={[styles.refreshText, { fontFamily }, isMobile && { fontSize: 11 }]}>Actualizar</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setShowHistorialReportesModal(false)} style={[styles.closeButton, isMobile && { width: 32, height: 32 }]}>
+                  <Ionicons name="close" size={isMobile ? 18 : 20} color="#cbd5e1" />
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            <View style={[styles.filtrosContainer, isMobile && styles.filtrosContainerMobile, { marginTop: 0, marginHorizontal: isMobile ? 8 : 20, marginBottom: isMobile ? 8 : 15 }]}>
+              <TouchableOpacity
+                style={styles.filtrosHeader}
+                onPress={() => setMostrarFiltrosTerminados(!mostrarFiltrosTerminados)}
+                activeOpacity={0.7}
+              >
+                <View style={styles.filtrosHeaderLeft}>
+                  <Ionicons name="filter-outline" size={18} color="#22d3ee" />
+                  <Text style={[styles.filtrosTitle, { fontFamily }]}>Filtros</Text>
+                  {(filtrosPrioridad.length > 0 || filtroCliente.length > 0 || filtroID.length > 0 || filtroFecha.length > 0) && (
+                    <View style={styles.filtrosActiveBadge}>
+                      <Text style={[styles.filtrosActiveBadgeText, { fontFamily }]}>
+                        {[
+                          filtrosPrioridad.length > 0,
+                          filtroCliente.length > 0,
+                          filtroID.length > 0,
+                          filtroFecha.length > 0
+                        ].filter(Boolean).length}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                  {(filtrosPrioridad.length > 0 || filtroCliente.length > 0 || filtroID.length > 0 || filtroFecha.length > 0) && (
+                    <TouchableOpacity onPress={() => {
+                      setFiltrosPrioridad([]);
+                      setFiltroCliente('');
+                      setFiltroID('');
+                      setFiltroFecha('');
+                    }} style={styles.limpiarFiltrosButtonSmall}>
+                      <Ionicons name="close-circle" size={16} color="#f87171" />
+                      <Text style={[styles.limpiarFiltrosTextSmall, { fontFamily }]}>Limpiar</Text>
+                    </TouchableOpacity>
+                  )}
+                  <Ionicons
+                    name={mostrarFiltrosTerminados ? "chevron-up" : "chevron-down"}
+                    size={24}
+                    color="#22d3ee"
+                  />
+                </View>
+              </TouchableOpacity>
+
+              {mostrarFiltrosTerminados && (
+                <View style={{ padding: 16, backgroundColor: 'rgba(15, 23, 42, 0.2)', borderRadius: 12, marginTop: 8 }}>
+                  <View style={[styles.filtroSection, isMobile && { gap: 2 }]}>
+                    <Text style={[styles.filtroLabel, { fontFamily }, isMobile && { fontSize: 11 }]}>
+                      <Ionicons name="alert-circle-outline" size={isMobile ? 12 : 14} color="#94a3b8" /> Prioridad
+                    </Text>
+                    <View style={styles.filtroChips}>
+                      {[
+                        { value: 'baja', label: 'Baja', icon: 'chevron-down-outline', color: '#10b981' },
+                        { value: 'media', label: 'Media', icon: 'remove-outline', color: '#f59e0b' },
+                        { value: 'alta', label: 'Urgente', icon: 'chevron-up-outline', color: '#ef4444' },
+                      ].map((prioridad) => {
+                        const isActive = filtrosPrioridad.includes(prioridad.value);
+                        return (
+                          <TouchableOpacity
+                            key={prioridad.value}
+                            onPress={() => {
+                              if (isActive) {
+                                setFiltrosPrioridad(filtrosPrioridad.filter(f => f !== prioridad.value));
+                              } else {
+                                setFiltrosPrioridad([...filtrosPrioridad, prioridad.value]);
+                              }
+                            }}
+                            style={[
+                              styles.filtroChip,
+                              isActive && { ...styles.filtroChipActive, borderColor: prioridad.color },
+                              isMobile && { paddingHorizontal: 6, paddingVertical: 4 }
+                            ]}
+                          >
+                            <Ionicons
+                              name={prioridad.icon as any}
+                              size={isMobile ? 12 : 14}
+                              color={isActive ? prioridad.color : '#94a3b8'}
+                            />
+                            <Text style={[
+                              styles.filtroChipText,
+                              { fontFamily },
+                              isMobile && { fontSize: 10 },
+                              isActive && { ...styles.filtroChipTextActive, color: prioridad.color }
+                            ]}>
+                              {prioridad.label}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </View>
+
+                  <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? 0 : 12, marginBottom: isMobile ? 0 : 8, marginTop: 8 }}>
+                    <View style={[styles.searchFilterContainerPro, isMobile ? styles.searchFilterContainerMobile : { flex: 1, marginBottom: 0 }]}>
+                      {!isMobile && (
+                        <View style={[styles.searchFilterLabelPro, isMobile && { marginBottom: 4 }]}>
+                          <Text style={[styles.searchFilterLabelText, { fontFamily }, isMobile && { fontSize: 10 }]}>Buscar por cliente / empresa</Text>
+                        </View>
+                      )}
+                      <View style={[
+                        styles.searchFilterInputWrapperPro,
+                        filtroCliente.length > 0 && styles.searchFilterInputWrapperFocused,
+                        { height: isMobile ? 36 : 38, backgroundColor: 'rgba(15, 23, 42, 0.4)' }
+                      ]}>
+                        <Ionicons name="person-outline" size={isMobile ? 14 : 18} color={filtroCliente.length > 0 ? "#06b6d4" : "#64748b"} />
+                        <TextInput
+                          style={[styles.searchInputPro, { fontFamily, paddingVertical: isMobile ? 4 : 8 }, isMobile && { fontSize: 13 }]}
+                          placeholder={isMobile ? "Cliente o empresa" : "Nombre o empresa..."}
+                          placeholderTextColor="#64748b"
+                          value={filtroCliente}
+                          onChangeText={setFiltroCliente}
+                        />
+                        {filtroCliente.length > 0 && (
+                          <TouchableOpacity onPress={() => setFiltroCliente('')}>
+                            <Ionicons name="close-circle" size={isMobile ? 16 : 20} color="#64748b" />
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    </View>
+
+                    <View style={[styles.searchFilterContainerPro, isMobile ? styles.searchFilterContainerMobile : { flex: 1, marginBottom: 0 }]}>
+                      {!isMobile && (
+                        <View style={[styles.searchFilterLabelPro, isMobile && { marginBottom: 4 }]}>
+                          <Text style={[styles.searchFilterLabelText, { fontFamily }, isMobile && { fontSize: 10 }]}>Fecha</Text>
+                        </View>
+                      )}
+                      <View style={[
+                        styles.searchFilterInputWrapperPro,
+                        filtroFecha.length > 0 && styles.searchFilterInputWrapperFocused,
+                        { height: isMobile ? 36 : 38, backgroundColor: 'rgba(15, 23, 42, 0.4)' }
+                      ]}>
+                        <CustomDatePicker
+                          value={filtroFecha}
+                          onChange={setFiltroFecha}
+                          isMobile={isMobile}
+                          fontFamily={fontFamily}
+                        />
+                      </View>
+                    </View>
+                  </View>
+
+                  <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? 0 : 12, marginBottom: isMobile ? 8 : 0 }}>
+                    <View style={[styles.searchFilterContainerPro, isMobile ? styles.searchFilterContainerMobile : { flex: 1, padding: 0, backgroundColor: 'transparent', borderWidth: 0, shadowOpacity: 0 }]}>
+                      {!isMobile && (
+                        <View style={[styles.searchFilterLabelPro, isMobile && { marginBottom: 4 }]}>
+                          <Text style={[styles.searchFilterLabelText, { fontFamily }, isMobile && { fontSize: 10 }]}>ID</Text>
+                        </View>
+                      )}
+                      <View style={[
+                        styles.searchFilterInputWrapperPro,
+                        filtroID.length > 0 && styles.searchFilterInputWrapperFocused,
+                        { height: isMobile ? 36 : 38, backgroundColor: 'rgba(15, 23, 42, 0.4)' }
+                      ]}>
+
+                        <TextInput
+                          style={[styles.searchInputPro, { fontFamily, paddingVertical: isMobile ? 4 : 8 }, isMobile && { fontSize: 13 }]}
+                          placeholder="ID..."
+                          placeholderTextColor="#64748b"
+                          value={filtroID}
+                          onChangeText={setFiltroID}
+                        />
+                        {filtroID.length > 0 && (
+                          <TouchableOpacity onPress={() => setFiltroID('')}>
+                            <Ionicons name="close-circle" size={isMobile ? 16 : 20} color="#64748b" />
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    </View>
+                  </View>
+                </View>
+              )}
+            </View>
+
+            {/* Conteo de resultados */}
+            {!loadingHistorialReportes && (
+              <View style={{ marginBottom: 15, paddingHorizontal: 20 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: 'rgba(30, 41, 59, 0.3)', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20, alignSelf: 'center', borderColor: 'rgba(6, 182, 212, 0.2)', borderWidth: 1 }}>
+                  <Ionicons name="document-text-outline" size={14} color="#06b6d4" />
+                  <Text style={[{ color: '#94a3b8', fontSize: 11, fontWeight: '600' }, { fontFamily }]}>
+                    {reportesTerminadosFiltrados.length} {reportesTerminadosFiltrados.length === 1 ? 'reporte encontrado' : 'reportes encontrados'}
+                  </Text>
+                </View>
+              </View>
+            )}
+
+            {loadingHistorialReportes && (
+              <View style={styles.infoBox}>
+                <Text style={[styles.infoText, { fontFamily }]}>Cargando reportes...</Text>
+              </View>
+            )}
+
+            {!loadingHistorialReportes && reportesTerminadosFiltrados.length === 0 ? (
+              <View style={styles.infoBox}>
+                <Text style={[styles.infoText, { fontFamily }]}>No hay reportes terminados.</Text>
+              </View>
+            ) : null}
+
+            {!loadingHistorialReportes && reportesTerminadosFiltrados.length > 0 ? (
+              <ScrollView style={isMobile ? { flex: 1 } : styles.listScroll} showsVerticalScrollIndicator={false}>
+                <View style={styles.listSpacing}>
+                  {reportesTerminadosFiltrados.map((rep) => (
+                    <View key={rep.id} style={styles.reportCard}>
+                      <View style={styles.reportHeader}>
+                        <View style={styles.reportHeaderText}>
+                          <View style={{ flexDirection: isMobile ? 'column' : 'row', alignItems: isMobile ? 'flex-start' : 'center', gap: isMobile ? 4 : 8, marginBottom: 2 }}>
+                            <Text style={[styles.reportTitle, isMobile && styles.reportTitleMobile, { fontFamily, flexShrink: 1 }]} numberOfLines={isMobile ? 2 : 1}>
+                              {rep.equipo_descripcion || 'Equipo / servicio'}
+                            </Text>
+                            <View style={{ backgroundColor: 'rgba(56, 189, 248, 0.1)', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 4, borderWidth: 1, borderColor: 'rgba(56, 189, 248, 0.2)', alignSelf: isMobile ? 'flex-start' : 'center' }}>
+                              <Text style={{ color: '#38bdf8', fontSize: 10, fontWeight: '700', fontFamily }}>Reporte ID: {rep.id}</Text>
+                            </View>
+                          </View>
+                          <Text style={[styles.reportSubtitle, { fontFamily }]} numberOfLines={1}>
+                            {rep.usuario_nombre} {rep.usuario_apellido} · {rep.usuario_email}
+                          </Text>
+                          <Text style={[styles.reportMeta, { fontFamily }]} numberOfLines={1}>
+                            {rep.empresa || 'Sin empresa'} • {rep.sucursal || 'Sin sucursal'}
+                          </Text>
+                          {rep.empleado_asignado_nombre && (
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 }}>
+                              <Ionicons name="construct-outline" size={12} color="#06b6d4" />
+                              <Text style={[{ color: '#06b6d4', fontSize: 11, fontWeight: '700', textTransform: 'uppercase' }, { fontFamily }]}>
+                                TÉCNICO: {rep.empleado_asignado_nombre}
+                              </Text>
+                            </View>
+                          )}
+                        </View>
+                        <TouchableOpacity
+                          onPress={async () => {
+                            setReporteSeleccionado(rep);
+                            setShowHistorialReportesModal(false);
+                            setShowReporteDetalle(true);
+
+                            setSucursalImagenUrl(rep.sucursal_imagen_url || undefined);
+                            if (!rep.sucursal_imagen_url && rep.empresa_id) {
+                              obtenerSucursalesPorEmpresa(String(rep.empresa_id)).then(res => {
+                                if (res.success && res.data) {
+                                  const suc = res.data.find((s: any) =>
+                                    s.nombre?.trim().toLowerCase() === rep.sucursal?.trim().toLowerCase()
+                                  );
+                                  if (suc && suc.imagen_url) {
+                                    setSucursalImagenUrl(suc.imagen_url);
+                                  }
+                                }
+                              }).catch(err => console.error(err));
+                            }
+
+                            // Cargar archivos del reporte
+                            setCargandoArchivos(true);
+                            const resultado = await obtenerArchivosReporteBackend(rep.id);
+                            if (resultado.success) {
+                              const soloMedia = (resultado.data || []).filter((a: any) => a.tipo_archivo !== 'pdf');
+                              setArchivosReporte(soloMedia);
+                            }
+                            setCargandoArchivos(false);
+                          }}
+                          style={styles.eyeCard}
+                        >
+                          <Ionicons name="eye-outline" size={16} color="#06b6d4" />
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          onPress={() => generarPDF(rep)}
+                          style={[
+                            styles.eyeCard,
+                            {
+                              marginLeft: 8,
+                              borderColor: '#ef4444',
+                              backgroundColor: 'rgba(239, 68, 68, 0.1)'
+                            }
+                          ]}
+                          disabled={generandoPDF !== null}
+                        >
+                          {generandoPDF === String(rep.id) ? (
+                            <ActivityIndicator size="small" color="#ef4444" />
+                          ) : (
+                            <Ionicons name="document-text-outline" size={16} color="#ef4444" />
+                          )}
+                        </TouchableOpacity>
+                      </View>
+
+                      <Text style={[styles.reportComment, { fontFamily }]} numberOfLines={2}>
+                        {rep.comentario || ''}
+                      </Text>
+
+                      <View style={styles.estadoSoloBadge}>
+                        <Text style={[styles.estadoSoloText, { fontFamily }]}>{estadoDisplay(estadoVisual(rep))}</Text>
+                      </View>
+                    </View>
+                  ))}
+                </View>
+              </ScrollView>
+            ) : null}
+          </View>
+        </View>
+      )}
+
+      {
+        showInventarioModal && (
+          <View style={[styles.modalOverlay, isMobile && styles.modalOverlayMobile, { padding: 0 }]}>
+            <View style={[styles.largeModal, isMobile && styles.largeModalMobile, { width: '100%', maxWidth: '100%', height: '100%', maxHeight: '100%', borderRadius: 0 }]}>
+              <View style={[styles.largeModalHeader, isMobile && styles.largeModalHeaderMobile]}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: isMobile ? 8 : 12, flex: 1 }}>
+                  <View style={{ backgroundColor: '#be185d', borderRadius: 12, padding: isMobile ? 8 : 10 }}>
+                    <Ionicons name="construct-outline" size={isMobile ? 20 : 24} color="#ec4899" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.largeModalTitle, isMobile && styles.largeModalTitleMobile, { fontFamily }]} numberOfLines={1}>Mis Herramientas</Text>
+                    <Text style={[styles.largeModalSubtitle, isMobile && styles.largeModalSubtitleMobile, { fontFamily }]} numberOfLines={1}>Herramientas asignadas a tu cargo</Text>
+                  </View>
+                </View>
+                <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+                  <TouchableOpacity onPress={() => cargarHerramientas(false)} style={styles.refreshButton} activeOpacity={0.7}>
+                    <Text style={[styles.refreshText, { fontFamily }]}>Actualizar</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={() => setShowInventarioModal(false)} activeOpacity={0.7}>
+                    <Ionicons name="close" size={isMobile ? 20 : 24} color="#94a3b8" />
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              {loadingHerramientas ? (
+                <View style={{ alignItems: 'center', paddingVertical: 40 }}>
+                  <Text style={[{ color: '#cbd5e1', fontSize: 14 }, { fontFamily }]}>Cargando herramientas...</Text>
+                </View>
+              ) : listaHerramientas.length === 0 ? (
+                <View style={{ alignItems: 'center', paddingVertical: 40 }}>
+                  <Ionicons name="construct" size={56} color="#94a3b8" style={{ marginBottom: 16, opacity: 0.4 }} />
+                  <Text style={[{ color: '#cbd5e1', fontSize: 15, textAlign: 'center', fontWeight: '600' }, { fontFamily }]}>
+                    No tienes herramientas asignadas
+                  </Text>
+                </View>
+              ) : (
+                <View style={[styles.inventoryTableWrapper, isMobile && { flex: 1 }]}>
+                  {!isMobile && (
+                    <View style={styles.inventoryTableHeader}>
+                      <Text style={[styles.inventoryHeaderCell, styles.colTool, { fontFamily }]}>Herramienta</Text>
+                      <Text style={[styles.inventoryHeaderCell, styles.colCategory, { fontFamily }]}>Categoría</Text>
+                      <Text style={[styles.inventoryHeaderCell, styles.colObs, { fontFamily }]}>Observaciones</Text>
+                      <Text style={[styles.inventoryHeaderCell, styles.colDate, { fontFamily }]}>Fecha</Text>
+                      <View style={styles.colStatus}>
+                        <Text style={[styles.inventoryHeaderCell, { fontFamily }]}>Estado</Text>
+                      </View>
+                    </View>
+                  )}
+                  <ScrollView style={isMobile ? { flex: 1 } : styles.modalList} showsVerticalScrollIndicator={false}>
+                    {listaHerramientas.map((herramienta: any, index: number) => (
+                      <TouchableOpacity
+                        key={index}
+                        style={styles.inventoryTableRow}
+                        activeOpacity={0.7}
+                        onPress={() => {
+                          setHerramientaSeleccionada(herramienta);
+                          setShowHerramientaDetalle(true);
+                        }}
+                      >
+                        {/* HERRAMIENTA */}
+                        <View style={styles.colTool}>
+                          <Text style={[styles.inventoryCellText, { fontFamily, fontWeight: '700' }]} numberOfLines={1}>
+                            {herramienta.herramienta_nombre || herramienta.nombre}
+                          </Text>
+                          {isMobile && (
+                            <Text style={[styles.inventoryCellSubText, { fontFamily }]}>
+                              {herramienta.categoria || 'General'}
+                            </Text>
+                          )}
+                        </View>
+
+                        {/* CATEGORIA (Desktop) */}
+                        {!isMobile && (
+                          <View style={styles.colCategory}>
+                            <Text style={[styles.inventoryCellText, { fontFamily }]}>
+                              {herramienta.categoria || 'General'}
+                            </Text>
+                          </View>
+                        )}
+
+                        {/* OBSERVACIONES (Desktop) */}
+                        {!isMobile && (
+                          <View style={styles.colObs}>
+                            <Text style={[styles.inventoryCellText, { fontFamily, fontSize: 12, color: '#94a3b8' }]} numberOfLines={2}>
+                              {herramienta.observaciones || 'Sin observaciones'}
+                            </Text>
+                          </View>
+                        )}
+
+                        {/* FECHA (Desktop) */}
+                        {!isMobile && (
+                          <View style={styles.colDate}>
+                            <Text style={[styles.inventoryCellText, { fontFamily, fontSize: 12 }]}>
+                              {herramienta.created_at ? new Date(herramienta.created_at).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '--'}
+                            </Text>
+                          </View>
+                        )}
+
+                        {/* ESTADO */}
+                        <View style={styles.colStatus}>
+                          <View style={styles.estadoSoloBadge}>
+                            <Text style={[styles.estadoSoloText, { fontFamily }]}>Asignada</Text>
+                          </View>
+                        </View>
+                      </TouchableOpacity>
+                    ))}
+                  </ScrollView>
+                </View>
+              )}
+            </View>
+          </View>
+        )
+      }
+
+      {
+        showExpressModal && reporteSeleccionado && (
+          <View style={[styles.modalOverlay, isMobile && styles.modalOverlayMobile]}>
+            <View style={[styles.largeModal, isMobile && styles.largeModalMobile]}>
+              <View style={[styles.detailModalHeader, isMobile && styles.detailModalHeaderMobile, { backgroundColor: '#7f1d1d' }]}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.detailModalTitle, isMobile && styles.detailModalTitleMobile, { fontFamily }]} numberOfLines={1}>Análisis y Reparación sin cotizar.</Text>
+                  <Text style={[styles.detailModalSubtitle, isMobile && styles.detailModalSubtitleMobile, { fontFamily, color: '#fca5a5' }]} numberOfLines={1}>Completa ambas fases sin cotizar. </Text>
+                </View>
+                <TouchableOpacity onPress={() => {
+                  setShowExpressModal(false);
+                  setShowReporteDetalle(true);
+                  // Reseteamos campos compartidos
+                  setDescripcionTrabajo('');
+                  setFotosRevisionUris([]);
+                  setReparacion('');
+                  setMaterialesRefacciones('');
+                  setRecomendaciones('');
+                  setRecomendacionesAdicionales('');
+                  setFotosPostprocesoUris([]);
+                }} activeOpacity={0.7}>
+                  <Ionicons name="close" size={isMobile ? 20 : 24} color="#fca5a5" />
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView style={styles.detailScroll} showsVerticalScrollIndicator={false}>
+                <View style={[styles.detailContent, isMobile && styles.detailContentMobile]}>
+                  {/* FASE 2.1: Análisis */}
+                  <View style={{ marginBottom: 16 }}>
+                    <Text style={{ fontFamily, color: '#f59e0b', fontWeight: 'bold', fontSize: 16, marginBottom: 12 }}>1. ANÁLISIS GENERAL</Text>
+
+                    <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile]}>
+                      <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>
+                        ANALISIS GENERAL (Documenta el problema)
+                      </Text>
+                      <TextInput
+                        style={[styles.textInputArea, { fontFamily }]}
+                        value={descripcionTrabajo}
+                        onChangeText={setDescripcionTrabajo}
+                        placeholder="Ingresa el análisis general del reporte..."
+                        placeholderTextColor="#64748b"
+                        multiline
+                        numberOfLines={4}
+                        textAlignVertical="top"
+                      />
+                    </View>
+
+                    {/* Sección de Foto de Revisión */}
+                    <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginTop: 16 }]}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, marginTop: 0 }]}>
+                          IMÁGENES DE ANÁLISIS
+                        </Text>
+                        {fotosRevisionUris.length > 0 && (
+                          <TouchableOpacity onPress={limpiarFotosRevision} activeOpacity={0.7} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                            <Ionicons name="trash-outline" size={14} color="#ef4444" />
+                            <Text style={{ color: '#ef4444', fontSize: 12, fontWeight: '600', fontFamily }}>Limpiar todo</Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                      <View style={{ marginTop: 8 }}>
+                        {fotosRevisionUris.length > 0 && (
+                          <ScrollView
+                            horizontal
+                            showsHorizontalScrollIndicator={true}
+                            style={{ marginBottom: 12 }}
+                            contentContainerStyle={{ paddingRight: 20 }}
+                          >
+                            {fotosRevisionUris.map((uri, index) => (
+                              <View key={index} style={{ marginRight: 10, position: 'relative' }}>
+                                <Image source={{ uri }} style={{ width: 75, height: 75, borderRadius: 8 }} />
+                                <TouchableOpacity
+                                  style={{ position: 'absolute', top: -5, right: -5, backgroundColor: 'rgba(239, 68, 68, 0.9)', borderRadius: 12, padding: 2, zIndex: 1 }}
+                                  onPress={() => eliminarFotoRevision(index)}
+                                >
+                                  <Ionicons name="close" size={14} color="#fff" />
+                                </TouchableOpacity>
+                              </View>
+                            ))}
+                          </ScrollView>
+                        )}
+                        <TouchableOpacity
+                          onPress={seleccionarFotoRevision}
+                          onDragOver={handleDragOver}
+                          onDrop={handleDrop}
+                          activeOpacity={0.8}
+                          style={styles.modernDropzone}
+                        >
+                          <View style={{ width: 56, height: 56, backgroundColor: 'rgba(56, 189, 248, 0.1)', borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginBottom: 12 }}>
+                            <Ionicons name="images-outline" size={32} color="#0ea5e9" />
+                          </View>
+                          <Text style={[styles.proActionTitle, { fontFamily, color: '#e0f2fe' }]}>
+                            {fotosRevisionUris.length === 0 ? 'Selecciona imágenes para subir' : `Imágenes seleccionadas: ${fotosRevisionUris.length}`}
+                          </Text>
+                          <Text style={[styles.proActionSubtitle, { fontFamily, color: '#7dd3fc', opacity: 0.8 }]}>
+                            Selecciona imágenes del trabajo realizado
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  </View>
+
+                  <View style={{ height: 1, backgroundColor: '#1e293b', marginVertical: 16 }} />
+
+                  {/* FASE 3.1: Reparación */}
+                  <View style={{ marginBottom: 16 }}>
+                    <Text style={{ fontFamily, color: '#10b981', fontWeight: 'bold', fontSize: 16, marginBottom: 12 }}>2. TRABAJO REALIZADO</Text>
+
+                    <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginBottom: 16 }]}>
+                      <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Reparación Realizada</Text>
+                      <TextInput
+                        style={[styles.textInputArea, isMobile && styles.textInputAreaMobile, { fontFamily }]}
+                        placeholder="Detalla lo que fue reparado..."
+                        placeholderTextColor="#cbd5e1"
+                        multiline
+                        numberOfLines={3}
+                        value={reparacion}
+                        onChangeText={setReparacion}
+                      />
+                    </View>
+
+                    <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginBottom: 16 }]}>
+                      <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Materiales / Refacciones</Text>
+                      <TextInput
+                        style={[styles.textInputArea, isMobile && styles.textInputAreaMobile, { fontFamily }]}
+                        placeholder="Materiales o refacciones utilizadas..."
+                        placeholderTextColor="#cbd5e1"
+                        multiline
+                        numberOfLines={2}
+                        value={materialesRefacciones}
+                        onChangeText={setMaterialesRefacciones}
+                      />
+                    </View>
+
+                    <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginBottom: 16 }]}>
+                      <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Recomendaciones</Text>
+                      <TextInput
+                        style={[styles.textInputArea, isMobile && styles.textInputAreaMobile, { fontFamily }]}
+                        placeholder="Recomendaciones para el cliente..."
+                        placeholderTextColor="#cbd5e1"
+                        multiline
+                        numberOfLines={3}
+                        value={recomendaciones}
+                        onChangeText={setRecomendaciones}
+                      />
+                    </View>
+
+                    <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginBottom: 16 }]}>
+                      <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Recomendaciones Adicionales</Text>
+                      <TextInput
+                        style={[styles.textInputArea, isMobile && styles.textInputAreaMobile, { fontFamily }]}
+                        placeholder="Recomendaciones adicionales (opcional)..."
+                        placeholderTextColor="#cbd5e1"
+                        multiline
+                        numberOfLines={2}
+                        value={recomendacionesAdicionales}
+                        onChangeText={setRecomendacionesAdicionales}
+                      />
+                    </View>
+
+                    {/* Imágenes de finalización */}
+                    <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginTop: 16 }]}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, color: '#10b981', fontWeight: 'bold', marginTop: 0 }]}>
+                          IMÁGENES DE FINALIZACIÓN
+                        </Text>
+                        {fotosPostprocesoUris.length > 0 && (
+                          <TouchableOpacity onPress={limpiarFotosPostproceso} activeOpacity={0.7} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                            <Ionicons name="trash-outline" size={14} color="#ef4444" />
+                            <Text style={{ color: '#ef4444', fontSize: 12, fontWeight: '600', fontFamily }}>Limpiar todo</Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                      <View style={{ marginTop: 8 }}>
+                        {fotosPostprocesoUris.length > 0 && (
+                          <ScrollView
+                            horizontal
+                            showsHorizontalScrollIndicator={true}
+                            style={{ marginBottom: 12 }}
+                            contentContainerStyle={{ paddingRight: 20 }}
+                          >
+                            {fotosPostprocesoUris.map((uri, index) => (
+                              <View key={index} style={{ marginRight: 10, position: 'relative' }}>
+                                <Image source={{ uri }} style={{ width: 75, height: 75, borderRadius: 8 }} />
+                                <TouchableOpacity
+                                  style={{ position: 'absolute', top: -5, right: -5, backgroundColor: 'rgba(239, 68, 68, 0.9)', borderRadius: 12, padding: 2, zIndex: 1 }}
+                                  onPress={() => eliminarFotoPostproceso(index)}
+                                >
+                                  <Ionicons name="close" size={14} color="#fff" />
+                                </TouchableOpacity>
+                              </View>
+                            ))}
+                          </ScrollView>
+                        )}
+                        <TouchableOpacity
+                          onPress={seleccionarFotoPostproceso}
+                          onDragOver={handleDragOver}
+                          onDrop={handleDrop}
+                          activeOpacity={0.8}
+                          style={[styles.modernDropzone, { borderColor: 'rgba(16, 185, 129, 0.4)' }]}
+                        >
+                          <View style={{ width: 56, height: 56, backgroundColor: 'rgba(16, 185, 129, 0.1)', borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginBottom: 12 }}>
+                            <Ionicons name="images-outline" size={32} color="#10b981" />
+                          </View>
+                          <Text style={[styles.proActionTitle, { fontFamily, color: '#ecfdf5' }]}>
+                            {fotosPostprocesoUris.length === 0 ? 'Selecciona imágenes de finalización' : `Imágenes seleccionadas: ${fotosPostprocesoUris.length}`}
+                          </Text>
+                          <Text style={[styles.proActionSubtitle, { fontFamily, color: '#6ee7b7', opacity: 0.8 }]}>
+                            Captura el resultado final del servicio
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  </View>
+
+                </View>
+              </ScrollView>
+
+              <View style={[styles.detailFooter, isMobile && styles.detailFooterMobile]}>
+                <TouchableOpacity
+                  style={[styles.detailCloseButton, isMobile && { flex: 0, width: '100%' }]}
+                  onPress={() => {
+                    setShowExpressModal(false);
+                    setShowReporteDetalle(true);
+                    setDescripcionTrabajo('');
+                    setFotosRevisionUris([]);
+                    setReparacion('');
+                    setMaterialesRefacciones('');
+                    setRecomendaciones('');
+                    setRecomendacionesAdicionales('');
+                    setFotosPostprocesoUris([]);
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[styles.detailCloseButtonText, { fontFamily }]}>Cancelar</Text>
+                </TouchableOpacity>
+
+                {descripcionTrabajo.trim().length > 0 && (
+                  <TouchableOpacity
+                    onPress={generarPDFBorradorExpress}
+                    disabled={generandoPDFBorrador}
+                    activeOpacity={0.85}
+                    style={{
+                      flex: isMobile ? 0 : 1,
+                      width: isMobile ? '100%' : undefined,
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 8,
+                      minHeight: 48,
+                      borderRadius: 14,
+                      borderWidth: 1.5,
+                      borderColor: generandoPDFBorrador ? '#334155' : '#ef4444',
+                      backgroundColor: generandoPDFBorrador ? 'rgba(239, 68, 68, 0.05)' : 'rgba(239, 68, 68, 0.1)',
+                      shadowColor: '#ef4444',
+                      shadowOffset: { width: 0, height: 2 },
+                      shadowOpacity: generandoPDFBorrador ? 0 : 0.25,
+                      shadowRadius: 6,
+                      elevation: generandoPDFBorrador ? 0 : 3,
+                    }}
+                  >
+                    <Ionicons
+                      name={generandoPDFBorrador ? 'hourglass-outline' : 'document-text-outline'}
+                      size={18}
+                      color={generandoPDFBorrador ? '#64748b' : '#ef4444'}
+                    />
+                    <Text style={[{
+                      color: generandoPDFBorrador ? '#64748b' : '#ef4444',
+                      fontWeight: '700',
+                      fontSize: isMobile ? 12 : 14,
+                    }, { fontFamily }]}>
+                      {generandoPDFBorrador ? 'Generando...' : 'Generar PDF CSC'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+
+                <LinearGradient
+                  colors={['#ef4444', '#b91c1c']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={[styles.detailActionButton, isMobile && { flex: 0, width: '100%' }]}
+                >
+                  <TouchableOpacity
+                    onPress={async () => {
+                      if (!descripcionTrabajo.trim()) {
+                        showToast('Por favor escribe el Análisis General', 'warning');
+                        return;
+                      }
+                      if (!reparacion.trim() || !materialesRefacciones.trim() || !recomendaciones.trim()) {
+                        showToast('Completa los campos de Reparación, Materiales y Recomendaciones', 'warning');
+                        return;
+                      }
+
+                      // Here is where we fire the API update to 'revision completada'
+                      await enviarAnalisisYReparacionExpress();
+                    }}
+                    disabled={guardandoCotizacion || guardandoFase2}
+                    activeOpacity={0.85}
+                    style={{ paddingVertical: 14, justifyContent: 'center', alignItems: 'center', minHeight: 48 }}
+                  >
+                    <Text style={[styles.detailActionButtonText, { fontFamily }]}>
+                      {(guardandoCotizacion || guardandoFase2) ? 'Guardando...' : 'Finalizar Servicio CSC'}
+                    </Text>
+                  </TouchableOpacity>
+                </LinearGradient>
+              </View>
+            </View>
+          </View>
+        )
+      }
+
+      {
+        showCotizarModal && reporteSeleccionado && (
+          <View style={[styles.modalOverlay, isMobile && styles.modalOverlayMobile]}>
+            <View style={[styles.largeModal, isMobile && styles.largeModalMobile]}>
+              <View style={[styles.detailModalHeader, isMobile && styles.detailModalHeaderMobile]}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.detailModalTitle, isMobile && styles.detailModalTitleMobile, { fontFamily }]} numberOfLines={1}>Enviar Análisis</Text>
+                  <Text style={[styles.detailModalSubtitle, isMobile && styles.detailModalSubtitleMobile, { fontFamily }]} numberOfLines={1}>Completa el análisis del reporte</Text>
+                </View>
+                <TouchableOpacity onPress={() => {
+                  setShowCotizarModal(false);
+                  setShowReporteDetalle(true);
+                  setDescripcionTrabajo('');
+                  setFotosRevisionUris([]);
+                }} activeOpacity={0.7}>
+                  <Ionicons name="close" size={isMobile ? 20 : 24} color="#94a3b8" />
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView style={styles.detailScroll} showsVerticalScrollIndicator={false}>
+                <View style={[styles.detailContent, isMobile && styles.detailContentMobile]}>
+                  {/* Información del reporte */}
+                  <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile]}>
+                    <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Equipo / Servicio</Text>
+                    <View style={[styles.detailValueBox, isMobile && styles.detailValueBoxMobile]}>
+                      <Text style={[styles.detailValueText, { fontFamily }]}>{reporteSeleccionado.equipo_descripcion}</Text>
+                    </View>
+                  </View>
+
+                  <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile]}>
+                    <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Solicitante</Text>
+                    <View style={[styles.detailValueBox, isMobile && styles.detailValueBoxMobile]}>
+                      <Text style={[styles.detailValueText, { fontFamily }]}>{reporteSeleccionado.usuario_nombre}</Text>
+                      {reporteSeleccionado.usuario_email && (
+                        <Text style={[styles.detailSubValue, { fontFamily }]}>{reporteSeleccionado.usuario_email}</Text>
+                      )}
+                    </View>
+                  </View>
+
+                  <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile]}>
+                    <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Comentario / Problema</Text>
+                    <View style={[styles.detailValueBox, isMobile && styles.detailValueBoxMobile]}>
+                      <Text style={[styles.detailValueText, { fontFamily }]}>{reporteSeleccionado.comentario || 'Sin comentarios'}</Text>
+                    </View>
+                  </View>
+
+                  {/* Campos de cotización */}
+                  <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginTop: 24 }]}>
+                    <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, color: '#f59e0b' }]}>
+                      ANALISIS GENERAL(ESCRIBIR AQUI LA INFORMACION MPORTANTE Y NECESARIA)
+                    </Text>
+                    <TextInput
+                      style={[styles.textInputArea, { fontFamily }]}
+                      value={descripcionTrabajo}
+                      onChangeText={setDescripcionTrabajo}
+                      placeholder="Ingresa el análisis general del reporte..."
+                      placeholderTextColor="#64748b"
+                      multiline
+                      numberOfLines={4}
+                      textAlignVertical="top"
+                    />
+                  </View>
+
+                  {/* Sección de Nota de Voz */}
+                  <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginTop: 20 }]}>
+                    <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>
+                      NOTA DE VOZ EXPLICATIVA(BREVE RETROALIMENTACION AL ADMINISTRADOR)
+                    </Text>
+
+                    <View style={styles.audioControlsContainer}>
+                      {!audioUri && !isRecording ? (
+                        <TouchableOpacity
+                          style={styles.audioRecordButton}
+                          onPress={startRecording}
+                          activeOpacity={0.7}
+                        >
+                          <Ionicons name="mic" size={24} color="#fff" />
+                          <Text style={[styles.audioButtonText, { fontFamily }]}>Grabar Nota</Text>
+                        </TouchableOpacity>
+                      ) : isRecording ? (
+                        <View style={styles.recordingStatusContainer}>
+                          <View style={styles.recordingPulse} />
+                          <Text style={[styles.recordingTime, { fontFamily }]}>{formatDuration(recordingDuration)}</Text>
+                          <TouchableOpacity
+                            style={styles.audioStopButton}
+                            onPress={stopRecording}
+                            activeOpacity={0.7}
+                          >
+                            <Ionicons name="stop" size={20} color="#fff" />
+                            <Text style={[styles.audioButtonText, { fontFamily }]}>Detener</Text>
+                          </TouchableOpacity>
+                        </View>
+                      ) : (
+                        <View style={styles.audioPlayerContainer}>
+                          <TouchableOpacity
+                            style={styles.audioPlayButton}
+                            onPress={playPauseAudio}
+                            activeOpacity={0.7}
+                          >
+                            <Ionicons name={isPlaying ? "pause" : "play"} size={24} color="#fff" />
+                          </TouchableOpacity>
+
+                          <View style={styles.audioInfoContainer}>
+                            <Text style={[styles.audioTitle, { fontFamily }]}>Nota grabada</Text>
+                            <Text style={[styles.audioDuration, { fontFamily }]}>{formatDuration(recordingDuration)}</Text>
+                          </View>
+
+                          <TouchableOpacity
+                            style={styles.audioDeleteButton}
+                            onPress={deleteRecording}
+                            activeOpacity={0.7}
+                          >
+                            <Ionicons name="trash-outline" size={20} color="#ef4444" />
+                          </TouchableOpacity>
+                        </View>
+                      )}
+                    </View>
+                  </View>
+
+                  {/* Sección de Foto de Revisión */}
+                  <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginTop: 20 }]}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, marginTop: 0 }]}>
+                        IMÁGENES DE ANÁLISIS
+                      </Text>
+                      {fotosRevisionUris.length > 0 && (
+                        <TouchableOpacity onPress={limpiarFotosRevision} activeOpacity={0.7} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                          <Ionicons name="trash-outline" size={14} color="#ef4444" />
+                          <Text style={{ color: '#ef4444', fontSize: 12, fontWeight: '600', fontFamily }}>Limpiar todo</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+
+                    <View style={{ marginTop: 8 }}>
+                      {fotosRevisionUris.length > 0 && (
+                        <ScrollView
+                          horizontal
+                          showsHorizontalScrollIndicator={true}
+                          style={{ marginBottom: 12 }}
+                          contentContainerStyle={{ paddingRight: 20 }}
+                        >
+                          {fotosRevisionUris.map((uri, index) => (
+                            <View key={index} style={{ marginRight: 10, position: 'relative' }}>
+                              <Image source={{ uri }} style={{ width: 75, height: 75, borderRadius: 8 }} />
+                              <TouchableOpacity
+                                style={{ position: 'absolute', top: -5, right: -5, backgroundColor: 'rgba(239, 68, 68, 0.9)', borderRadius: 12, padding: 2, zIndex: 1 }}
+                                onPress={() => eliminarFotoRevision(index)}
+                              >
+                                <Ionicons name="close" size={14} color="#fff" />
+                              </TouchableOpacity>
+                            </View>
+                          ))}
+                        </ScrollView>
+                      )}
+
+                      <TouchableOpacity
+                        onPress={seleccionarFotoRevision}
+                        onDragOver={handleDragOver}
+                        onDrop={handleDrop}
+                        activeOpacity={0.8}
+                        style={styles.modernDropzone}
+                      >
+                        <View style={{ width: 56, height: 56, backgroundColor: 'rgba(56, 189, 248, 0.1)', borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginBottom: 12 }}>
+                          <Ionicons name="images-outline" size={32} color="#0ea5e9" />
+                        </View>
+                        <Text style={[styles.proActionTitle, { fontFamily, color: '#e0f2fe' }]}>
+                          {fotosRevisionUris.length === 0 ? 'Selecciona imágenes para subir' : `Imágenes seleccionadas: ${fotosRevisionUris.length}`}
+                        </Text>
+                        <Text style={[styles.proActionSubtitle, { fontFamily, color: '#7dd3fc', opacity: 0.8 }]}>
+                          Selecciona imágenes del trabajo realizado
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                </View>
+              </ScrollView>
+
+              <View style={[styles.detailFooter, isMobile && styles.detailFooterMobile]}>
+                <TouchableOpacity
+                  style={[styles.detailCloseButton, isMobile && { flex: 0, width: '100%' }]}
+                  onPress={() => {
+                    setShowCotizarModal(false);
+                    setShowReporteDetalle(true);
+                    setDescripcionTrabajo('');
+                    setFotosRevisionUris([]);
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[styles.detailCloseButtonText, { fontFamily }]}>Cancelar</Text>
+                </TouchableOpacity>
+
+                <LinearGradient
+                  colors={['#d97706', '#f59e0b']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={[styles.detailActionButton, isMobile && { flex: 0, width: '100%' }]}
+                >
+                  <TouchableOpacity
+                    onPress={guardarCotizacion}
+                    disabled={guardandoCotizacion}
+                    activeOpacity={0.85}
+                    style={{ paddingVertical: 14, justifyContent: 'center', alignItems: 'center', minHeight: 48 }}
+                  >
+                    <Text style={[styles.detailActionButtonText, { fontFamily }]}>
+                      {guardandoCotizacion ? 'Enviando...' : 'Enviar Análisis'}
+                    </Text>
+                  </TouchableOpacity>
+                </LinearGradient>
+              </View>
+            </View>
+          </View>
+        )
+      }
+
+      {
+        showArchivoModal && archivoVisualizando && (
+          <View style={[styles.modalOverlay, isMobile && styles.modalOverlayMobile, { zIndex: 9999, elevation: 50 }]}>
+            <View style={[styles.archivoModalContent, { flex: 1, flexDirection: 'column', justifyContent: 'center' }]}>
+              <TouchableOpacity
+                style={[styles.archivoModalClose, isMobile && styles.archivoModalCloseMobile]}
+                onPress={() => {
+                  setShowArchivoModal(false);
+                  setArchivoVisualizando(null);
+                }}
+              >
+                <Ionicons name="close" size={28} color="#fff" />
+              </TouchableOpacity>
+
+              <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', width: '100%', height: '100%' }}>
+                {archivoVisualizando.tipo_archivo === 'imagen' || archivoVisualizando.tipo_archivo === 'foto' || archivoVisualizando.tipo_archivo === 'foto_revision' || archivoVisualizando.tipo_archivo?.startsWith('image/') ? (
+                  <Image
+                    source={{ uri: archivoVisualizando.url || archivoVisualizando.uri }}
+                    style={{ width: '100%', height: '100%', resizeMode: 'contain' }}
+                    resizeMode="contain"
+                  />
+                ) : archivoVisualizando.tipo_archivo === 'video' || archivoVisualizando.tipo_archivo?.startsWith('video/') ? (
+                  <TouchableOpacity
+                    onPress={() => {
+                      setShowArchivoModal(false);
+                      setArchivoVisualizando(null);
+                      const videoUrl = archivoVisualizando.url || archivoVisualizando.uri;
+                      openMediaExternally(videoUrl);
+                    }}
+                    activeOpacity={0.8}
+                    style={{ alignItems: 'center', gap: 12 }}
+                  >
+                    <Ionicons name="play-circle" size={72} color="#60a5fa" />
+                    <Text style={{ color: '#e2e8f0', fontFamily, fontSize: 16 }}>
+                      Abrir video
+                    </Text>
+                  </TouchableOpacity>
+                ) : (
+                  <View style={{ alignItems: 'center' }}>
+                    <Ionicons name="document" size={80} color="#94a3b8" />
+                    <Text style={{ color: '#fff', marginTop: 20, fontFamily, fontSize: 16 }}>
+                      Este archivo no se puede previsualizar
+                    </Text>
+                  </View>
+                )}
+              </View>
+            </View>
+          </View>
+        )
+      }
+
+      {
+        showRechazarModal && reporteARechazar && (
+          <View style={styles.overlay}>
+            <View style={styles.modalCard}>
+              <View style={styles.modalHeaderRow}>
+                <View style={[styles.modalIconWrapper, { backgroundColor: 'rgba(239, 68, 68, 0.15)', borderColor: '#ef4444' }]}>
+                  <Ionicons name="close-circle-outline" size={24} color="#ef4444" />
+                </View>
+                <Text style={[styles.modalTitle, { fontFamily }]}>Rechazar Asignación</Text>
+              </View>
+              <Text style={[styles.modalBodyText, { fontFamily }]}>
+                ¿Por qué estás rechazando este reporte? (Opcional)
+              </Text>
+
+              <TextInput
+                style={[
+                  styles.textInputArea,
+                  {
+                    fontFamily,
+                    marginTop: 12,
+                    marginBottom: 20,
+                    minHeight: 80,
+                    backgroundColor: '#1e293b',
+                    borderColor: '#334155',
+                    borderWidth: 1,
+                    borderRadius: 8,
+                    padding: 12,
+                    color: '#f1f5f9'
+                  }
+                ]}
+                placeholder="Escribe el motivo del rechazo aquí..."
+                placeholderTextColor="#64748b"
+                multiline
+                numberOfLines={3}
+                value={rechazoMotivo}
+                onChangeText={setRechazoMotivo}
+                textAlignVertical="top"
+                editable={!rechazandoAsignacion}
+              />
+
+              <View style={styles.modalActions}>
+                <TouchableOpacity
+                  style={styles.modalSecondary}
+                  onPress={() => {
+                    setShowRechazarModal(false);
+                    setRechazoMotivo('');
+                    setReporteARechazar(null);
+                    setShowReporteDetalle(true); // Vuelve al detalle
+                  }}
+                  disabled={rechazandoAsignacion}
+                >
+                  <Text style={[styles.modalSecondaryText, { fontFamily }]}>Cancelar</Text>
+                </TouchableOpacity>
+                <LinearGradient
+                  colors={['#ef4444', '#b91c1c']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 0 }}
+                  style={styles.modalPrimary}
+                >
+                  <TouchableOpacity
+                    onPress={confirmarRechazoAsignacion}
+                    disabled={rechazandoAsignacion}
+                    activeOpacity={0.85}
+                    style={{ width: '100%', alignItems: 'center' }}
+                  >
+                    <Text style={[styles.modalPrimaryText, { fontFamily, color: 'white' }]}>
+                      {rechazandoAsignacion ? 'Rechazando...' : 'Rechazar'}
+                    </Text>
+                  </TouchableOpacity>
+                </LinearGradient>
+              </View>
+            </View>
+          </View>
+        )
+      }
+
+      {
+        showConfirmarFinalizarModal && (
+          <View style={styles.overlay}>
+            <View style={styles.modalCard}>
+              <View style={styles.modalHeaderRow}>
+                <View style={[styles.modalIconWrapper, { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: '#10b981' }]}>
+                  <Ionicons name="cloud-upload-outline" size={24} color="#10b981" />
+                </View>
+                <Text style={[styles.modalTitle, { fontFamily }]}>Confirmar Envío</Text>
+              </View>
+              <Text style={[styles.modalBodyText, { fontFamily }]}>
+                ¿Estás seguro de que deseas finalizar este trabajo y enviar el reporte? No podrás editarlo después de enviarlo.
+              </Text>
+              <View style={styles.modalActions}>
+                <TouchableOpacity
+                  style={styles.modalSecondary}
+                  onPress={() => setShowConfirmarFinalizarModal(false)}
+                  disabled={guardandoFase2}
+                >
+                  <Text style={[styles.modalSecondaryText, { fontFamily }]}>Cancelar</Text>
+                </TouchableOpacity>
+                <LinearGradient
+                  colors={['#10b981', '#06b6d4']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 0 }}
+                  style={styles.modalPrimary}
+                >
+                  <TouchableOpacity
+                    onPress={handleFinalizarTrabajo}
+                    disabled={guardandoFase2}
+                    activeOpacity={0.85}
+                    style={{ width: '100%', alignItems: 'center' }}
+                  >
+                    <Text style={[styles.modalPrimaryText, { fontFamily }]}>
+                      {guardandoFase2 ? 'Enviando...' : 'Sí, finalizar'}
+                    </Text>
+                  </TouchableOpacity>
+                </LinearGradient>
+              </View>
+            </View>
+          </View>
+        )
+      }
+      {
+        toastMessage && (
+          <View
+            style={{
+              position: 'absolute',
+              bottom: 20,
+              left: 16,
+              right: 16,
+              borderRadius: 12,
+              overflow: 'hidden',
+              zIndex: 9999,
+            }}
+          >
+            <LinearGradient
+              colors={
+                toastType === 'success'
+                  ? ['#10b981', '#059669']
+                  : toastType === 'error'
+                    ? ['#ef4444', '#dc2626']
+                    : toastType === 'warning'
+                      ? ['#f59e0b', '#d97706']
+                      : ['#06b6d4', '#0891b2']
+              }
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                paddingHorizontal: 16,
+                paddingVertical: 14,
+                gap: 12,
+              }}
+            >
+              <Ionicons
+                name={
+                  toastType === 'success'
+                    ? 'checkmark-circle'
+                    : toastType === 'error'
+                      ? 'alert-circle'
+                      : toastType === 'warning'
+                        ? 'warning'
+                        : 'information-circle'
+                }
+                size={24}
+                color="white"
+              />
+              <Text
+                style={{
+                  color: 'white',
+                  fontWeight: '600',
+                  fontSize: 14,
+                  flex: 1,
+                  fontFamily,
+                }}
+              >
+                {toastMessage}
+              </Text>
+            </LinearGradient>
+          </View>
+        )
+      }
+      {/* Modal Detalle de Herramienta */}
+      {showHerramientaDetalle && herramientaSeleccionada && (
+        <View style={[styles.modalOverlay, { zIndex: 9999 }]}>
+          <View style={styles.toolDetailCard}>
+            <View style={styles.toolDetailHeader}>
+              <View style={styles.toolDetailIcon}>
+                <Ionicons name="construct" size={28} color="#ec4899" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.toolDetailTitle, { fontFamily }]}>
+                  {herramientaSeleccionada.herramienta_nombre || herramientaSeleccionada.nombre}
+                </Text>
+                <Text style={{ color: '#ec4899', fontSize: 12, fontWeight: '600', fontFamily }}>Detalles del Equipo</Text>
+              </View>
+              <TouchableOpacity onPress={() => setShowHerramientaDetalle(false)} activeOpacity={0.7} style={{ padding: 4 }}>
+                <Ionicons name="close" size={24} color="#94a3b8" />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: 400 }}>
+              <View style={styles.toolDetailInfoRow}>
+                <Text style={[styles.toolDetailLabel, { fontFamily }]}>Categoría</Text>
+                <View style={styles.toolDetailValueContainer}>
+                  <Text style={[styles.toolDetailValue, { fontFamily }]}>
+                    {herramientaSeleccionada.categoria || 'General'}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.toolDetailInfoRow}>
+                <Text style={[styles.toolDetailLabel, { fontFamily }]}>Observaciones</Text>
+                <View style={styles.toolDetailValueContainer}>
+                  <Text style={[styles.toolDetailValue, { fontFamily, color: herramientaSeleccionada.observaciones ? '#f1f5f9' : '#64748b' }]}>
+                    {herramientaSeleccionada.observaciones || 'Sin observaciones registradas'}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.toolDetailInfoRow}>
+                <Text style={[styles.toolDetailLabel, { fontFamily }]}>Fecha de Asignación</Text>
+                <View style={styles.toolDetailValueContainer}>
+                  <Text style={[styles.toolDetailValue, { fontFamily }]}>
+                    {herramientaSeleccionada.created_at ? new Date(herramientaSeleccionada.created_at).toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' }) : 'No disponible'}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.toolDetailInfoRow}>
+                <Text style={[styles.toolDetailLabel, { fontFamily }]}>Estado Actual</Text>
+                <View style={styles.estadoSoloBadge}>
+                  <Text style={[styles.estadoSoloText, { fontFamily }]}>Asignada</Text>
+                </View>
+              </View>
+            </ScrollView>
+
+            <TouchableOpacity
+              style={[styles.modalSecondary, { marginTop: 24, width: '100%', backgroundColor: '#1e293b', flex: 0, minHeight: 48, paddingVertical: 14 }]}
+              onPress={() => setShowHerramientaDetalle(false)}
+            >
+              <Text style={[styles.modalSecondaryText, { fontFamily, color: '#fff', fontSize: 14 }]}>Entendido</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {/* Overlay de Progreso de Carga Premium */}
+      <UploadProgressOverlay
+        visible={showUploadProgress}
+        progress={uploadProgress.percent}
+        steps={uploadSteps}
+        currentStep={currentUploadStep}
+        estimatedTime={estimatedTimeLeft}
+        phase={uploadProgress.phase}
+        currentCount={uploadProgress.uploaded}
+        totalCount={uploadProgress.total}
+      />
+    </SafeAreaView >
+  );
+}
+
+export default function EmpleadoPanel() {
+  const router = useRouter();
+  const [authorized, setAuthorized] = useState(false);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    const verificarAcceso = async () => {
+      try {
+        const user = await AsyncStorage.getItem('user');
+        if (!user) {
+          router.replace('/');
+          return;
+        }
+        const parsedUser = JSON.parse(user);
+        if (parsedUser.rol !== 'empleado') {
+          console.warn(`[SEGURIDAD] Usuario ${parsedUser.email} con rol ${parsedUser.rol} intentó acceder a /empleado-panel`);
+          switch (parsedUser.rol) {
+            case 'admin':
+              router.replace('/admin');
+              break;
+            case 'cliente':
+              router.replace('/cliente-panel');
+              break;
+            default:
+              router.replace('/');
+          }
+          return;
+        }
+        setAuthorized(true);
+      } catch (error) {
+        router.replace('/');
+      } finally {
+        setChecking(false);
+      }
+    };
+    verificarAcceso();
+  }, [router]);
+
+  if (checking) {
+    return (
+      <SafeAreaView style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0f172a' }}>
+        <ActivityIndicator size="large" color="#3b82f6" />
+      </SafeAreaView>
+    );
+  }
+
+  if (!authorized) {
+    return null;
+  }
+
+  return <EmpleadoPanelContent />;
+}
+
+const styles = StyleSheet.create({
+  safeArea: { flex: 1, backgroundColor: '#0f172a' },
+  scroll: { flex: 1, backgroundColor: '#0f172a' },
+  scrollContent: { paddingBottom: 32, backgroundColor: '#0f172a' },
+  container: {
+    flex: 1,
+    paddingHorizontal: 32,
+    paddingVertical: 28,
+    maxWidth: 1200,
+    alignSelf: 'center',
+    width: '100%',
+  },
+  containerMobile: {
+    paddingHorizontal: 16,
+    paddingVertical: 20,
+  },
+  headerRow: {
+    marginBottom: 32,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  headerRowMobile: {
+    marginBottom: 24,
+  },
+  headerLeft: { flex: 1, flexDirection: 'row', alignItems: 'center' },
+  badgeWrapper: { position: 'relative', marginRight: 16 },
+  badge: {
+    width: 64,
+    height: 64,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#06b6d4',
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  badgeMobile: {
+    width: 56,
+    height: 56,
+    borderRadius: 16,
+    shadowRadius: 10,
+  },
+  badgeText: { color: '#fff', fontSize: 20, fontWeight: '700', letterSpacing: 1 },
+  badgeDot: {
+    position: 'absolute',
+    bottom: -4,
+    right: -4,
+    width: 16,
+    height: 16,
+    backgroundColor: '#10b981',
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: '#020617',
+  },
+  welcomeTextWrapper: { flex: 1 },
+  welcomeTitle: { color: '#fff', fontSize: 24, fontWeight: '700' },
+  welcomeTitleMobile: { fontSize: 20 },
+  welcomeName: { color: '#22d3ee', fontWeight: '800' },
+  welcomeSubtitle: { color: '#94a3b8', fontSize: 13, marginTop: 4 },
+  headerActions: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'center',
+  },
+  toggleButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    backgroundColor: 'rgba(30, 41, 59, 0.8)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  logoutButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    backgroundColor: 'rgba(30, 41, 59, 0.8)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  statsRow: {
+    marginBottom: 32,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 20,
+  },
+  statsRowMobile: {
+    marginBottom: 24,
+    gap: 12,
+  },
+  statCard: {
+    flexBasis: 'calc(25% - 15px)',
+    flexGrow: 1,
+    minWidth: 180,
+    backgroundColor: 'rgba(30,41,59,0.4)',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(51,65,85,0.5)',
+    padding: 24,
+  },
+  statCardMobile: {
+    flexBasis: '100%',
+    minWidth: 'auto',
+    borderRadius: 16,
+    padding: 20,
+  },
+  statHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  statIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+  },
+  statChip: {
+    backgroundColor: 'rgba(51,65,85,0.5)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  statChipText: { color: '#cbd5e1', fontSize: 11, fontWeight: '600' },
+  statValue: { color: '#fff', fontSize: 28, fontWeight: '800', marginBottom: 4 },
+  statLabel: { color: '#cbd5e1', fontSize: 14, fontWeight: '600' },
+  sectionHeader: { marginBottom: 20 },
+  sectionHeaderMobile: { marginBottom: 16 },
+  sectionTitle: { color: '#fff', fontSize: 26, fontWeight: '800', marginBottom: 6 },
+  sectionTitleMobile: { fontSize: 22, marginBottom: 4 },
+  sectionSubtitle: { color: '#94a3b8', fontSize: 13 },
+  optionsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    columnGap: 20,
+    rowGap: 20,
+    marginBottom: 16,
+  },
+  optionsGridMobile: {
+    columnGap: 10,
+    rowGap: 10,
+    marginBottom: 8,
+  },
+  optionTouchable: {
+    flexBasis: 'calc(50% - 10px)',
+    minWidth: 280,
+  },
+  optionTouchableMobile: {
+    flexBasis: '100%',
+    minWidth: 'auto',
+  },
+  optionCard: {
+    borderRadius: 18,
+    padding: 20,
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.1)',
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    minHeight: 100,
+  },
+  optionContent: { flexDirection: 'row', alignItems: 'flex-start' },
+  optionIconWrapper: {
+    width: 48,
+    height: 48,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+    flexShrink: 0,
+  },
+  optionTextWrapper: { flex: 1 },
+  optionTitle: { color: '#fff', fontSize: 16, fontWeight: '800', marginBottom: 2 },
+  optionDescription: { color: 'rgba(255,255,255,0.85)', fontSize: 12, fontWeight: '600' },
+  overlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+    zIndex: 10,
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    borderRadius: 16,
+    padding: 20,
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 10 },
+  },
+  modalHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 12 },
+  modalIconWrapper: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+  },
+  modalTitle: { color: '#fff', fontSize: 18, fontWeight: '700' },
+  modalBodyText: { color: '#cbd5e1', fontSize: 14, marginBottom: 18 },
+  modalActions: { flexDirection: 'row', gap: 14, marginTop: 6 },
+  modalSecondary: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+    backgroundColor: '#1f2937',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalSecondaryText: { color: '#e2e8f0', fontWeight: '700' },
+  modalPrimary: {
+    flex: 1,
+    borderRadius: 12,
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalPrimaryText: { color: '#fff', fontWeight: '700', textAlign: 'center', paddingVertical: 12 },
+  tareasModalContent: {
+    backgroundColor: '#0f172a',
+    borderRadius: 16,
+    padding: 20,
+    maxWidth: 600,
+    maxHeight: '80%',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    shadowColor: '#000',
+    shadowOpacity: 0.4,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 8 },
+  },
+  tareasModalContentMobile: {
+    maxWidth: '90%',
+    maxHeight: '85%',
+    padding: 16,
+  },
+  tareasModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1e293b',
+  },
+  tareasModalTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  tareasList: {
+    maxHeight: 400,
+    marginBottom: 16,
+  },
+  tareaCard: {
+    backgroundColor: 'rgba(30, 41, 59, 0.5)',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 12,
+    borderColor: '#1e293b',
+  },
+  tareaAdmin: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  tareaDescripcion: {
+    color: '#f0f9ff',
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 8,
+  },
+  estadoBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  estadoBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  tareaCloseButton: {
+    backgroundColor: '#1f2937',
+    borderColor: '#334155',
+  },
+  tareaCloseButtonText: {
+    color: '#e2e8f0',
+    fontWeight: '700',
+  },
+  reportesModalContent: {
+    backgroundColor: '#0f172a',
+    borderRadius: 16,
+    padding: 20,
+    maxWidth: 600,
+    maxHeight: '80%',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    shadowColor: '#000',
+    shadowOpacity: 0.4,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 8 },
+  },
+  reportesModalContentMobile: {
+    maxWidth: '90%',
+    maxHeight: '85%',
+    padding: 16,
+  },
+  reportesModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1e293b',
+  },
+  reportesModalTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  reportesList: {
+    maxHeight: 400,
+    marginBottom: 16,
+  },
+  reporteCard: {
+    backgroundColor: 'rgba(30, 41, 59, 0.5)',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 12,
+    borderColor: '#1e293b',
+  },
+  reporteEquipo: {
+    color: '#f0f9ff',
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  reporteUsuario: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  reporteCloseButton: {
+    backgroundColor: '#1f2937',
+    borderColor: '#334155',
+  },
+  reporteCloseButtonText: {
+    color: '#e2e8f0',
+    fontWeight: '700',
+  },
+  detalleModalContent: {
+    backgroundColor: '#0f172a',
+    borderRadius: 16,
+    padding: 20,
+    maxWidth: 600,
+    maxHeight: '85%',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    shadowColor: '#000',
+    shadowOpacity: 0.4,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 8 },
+  },
+  detalleModalContentMobile: {
+    maxWidth: '90%',
+    maxHeight: '90%',
+    padding: 16,
+  },
+  detalleModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1e293b',
+  },
+  detalleModalTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  detalleField: {
+    marginBottom: 16,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1e293b',
+  },
+  detalleLabel: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 6,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  detalleValue: {
+    color: '#f0f9ff',
+    fontSize: 15,
+    fontWeight: '500',
+  },
+  detalleValueText: {
+    color: '#f0f9ff',
+    fontSize: 14,
+  },
+  detalleTextBox: {
+    backgroundColor: 'rgba(30, 41, 59, 0.5)',
+    borderRadius: 8,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    marginTop: 6,
+  },
+  detalleCancelButton: {
+    backgroundColor: '#1f2937',
+    borderColor: '#334155',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  detalleCancelButtonText: {
+    color: '#e2e8f0',
+    fontWeight: '700',
+  },
+  detalleCompleteButton: {
+    backgroundColor: '#3b82f6',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  detalleCompleteButtonText: {
+    color: '#fff',
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  modalOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalOverlayMobile: {
+    padding: 0,
+  },
+  largeModal: {
+    width: '100%',
+    maxWidth: 900,
+    maxHeight: '90%',
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    borderRadius: 24,
+    padding: 0,
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 10 },
+    overflow: 'hidden',
+    flexDirection: 'column',
+  },
+  largeModalMobile: {
+    width: '100%',
+    maxWidth: '100%',
+    maxHeight: '95%',
+    height: '95%',
+    borderRadius: 16,
+    borderBottomLeftRadius: 0,
+    borderBottomRightRadius: 0,
+    marginVertical: 0,
+    alignSelf: 'flex-end',
+  },
+  largeModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingVertical: 18,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1e293b',
+    backgroundColor: 'rgba(15, 23, 42, 0.8)',
+  },
+  largeModalHeaderMobile: {
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+  },
+  largeModalTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  largeModalTitleMobile: {
+    fontSize: 16,
+  },
+  largeModalSubtitle: {
+    color: '#94a3b8',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  largeModalSubtitleMobile: {
+    fontSize: 11,
+  },
+  modalList: {
+    flex: 1,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+  },
+  modalListMobile: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  professionalCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1e293b',
+    borderRadius: 12,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#334155',
+    overflow: 'hidden',
+    paddingRight: 12,
+  },
+  cardAccentLeft: {
+    width: 4,
+    height: '100%',
+  },
+  cardTitle: {
+    color: '#f1f5f9',
+    fontSize: 15,
+    fontWeight: '700',
+    flex: 1,
+  },
+  cardMeta: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '500',
+    marginTop: 4,
+  },
+  cardDate: {
+    color: '#64748b',
+    fontSize: 11,
+    fontWeight: '500',
+  },
+  statusBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 20,
+    borderWidth: 1,
+  },
+  statusBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  cardContainer: {
+    backgroundColor: '#1e293b',
+    borderRadius: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+    overflow: 'hidden',
+    flexDirection: 'row',
+  },
+  cardContainerMobile: {
+    marginBottom: 10,
+    borderRadius: 10,
+  },
+  cardContent: {
+    flex: 1,
+    padding: 16,
+  },
+  cardContentMobile: {
+    padding: 12,
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 10,
+  },
+  cardMainTitle: {
+    color: '#f1f5f9',
+    fontSize: 17,
+    fontWeight: '700',
+    marginBottom: 6,
+  },
+  cardUserInfo: {
+    color: '#94a3b8',
+    fontSize: 13,
+    marginBottom: 4,
+  },
+  cardCompanyInfo: {
+    color: '#64748b',
+    fontSize: 12,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  cardDescription: {
+    color: '#cbd5e1',
+    fontSize: 14,
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+  cardFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  cardEyeButton: {
+    backgroundColor: '#334155',
+    borderRadius: 8,
+    width: 38,
+    height: 38,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 12,
+  },
+  detailModalHeader: {
+    paddingHorizontal: 20,
+    paddingVertical: 18,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1e293b',
+    backgroundColor: 'rgba(15, 23, 42, 0.8)',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  detailModalHeaderMobile: {
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+  },
+  detailModalTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  detailModalTitleMobile: {
+    fontSize: 16,
+  },
+  detailModalSubtitle: {
+    color: '#94a3b8',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  detailModalSubtitleMobile: {
+    fontSize: 11,
+  },
+  detailScroll: {
+    flex: 1,
+  },
+  detailContent: {
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    gap: 16,
+  },
+  detailContentMobile: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    gap: 12,
+  },
+  detailFieldGroup: {
+    gap: 8,
+  },
+  detailFieldGroupMobile: {
+    gap: 6,
+  },
+  detailFieldLabel: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+    textTransform: 'uppercase',
+  },
+  detailFieldLabelMobile: {
+    fontSize: 11,
+  },
+  detailValueBox: {
+    backgroundColor: '#1e293b',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  detailValueBoxMobile: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 8,
+  },
+  detailValueText: {
+    color: '#f1f5f9',
+    fontSize: 15,
+    lineHeight: 20,
+  },
+  detailSubValue: {
+    color: '#64748b',
+    fontSize: 13,
+    marginTop: 6,
+  },
+  detailRowFields: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  detailFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 12,
+    paddingHorizontal: 20,
+    paddingVertical: 18,
+    borderTopWidth: 1,
+    borderTopColor: '#1e293b',
+    backgroundColor: 'rgba(15, 23, 42, 0.95)',
+  },
+  detailFooterMobile: {
+    flexDirection: 'column',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    gap: 10,
+  },
+  detailFooterButton: {
+    flex: 1,
+    minHeight: 48,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  detailFooterButtonMobile: {
+    width: '100%',
+  },
+  recordButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 24,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  recordDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#fff',
+  },
+  refreshButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#1f2937',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  refreshText: {
+    color: '#67e8f9',
+    fontSize: 12,
+    fontWeight: '700'
+  },
+  detailCloseButton: {
+    flex: 1,
+    backgroundColor: '#334155',
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  detailCloseButtonText: {
+    color: '#e2e8f0',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  detailActionButton: {
+    flex: 1,
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
+  detailActionButtonText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  textInputArea: {
+    backgroundColor: '#1e293b',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    color: '#f1f5f9',
+    fontSize: 15,
+    minHeight: 100,
+    textAlignVertical: 'top',
+  },
+  audioControlsContainer: {
+    backgroundColor: '#1e293b',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#334155',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 4,
+  },
+  audioRecordButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ef4444',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 25,
+    gap: 8,
+  },
+  audioButtonText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  recordingStatusContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+  },
+  recordingPulse: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#ef4444',
+  },
+  recordingTime: {
+    color: '#f1f5f9',
+    fontSize: 18,
+    fontWeight: '700',
+    minWidth: 50,
+  },
+  audioStopButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#334155',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    gap: 6,
+    borderWidth: 1,
+    borderColor: '#475569',
+  },
+  audioPlayerContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    width: '100%',
+    gap: 12,
+  },
+  audioPlayButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#3b82f6',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  audioInfoContainer: {
+    flex: 1,
+  },
+  audioTitle: {
+    color: '#f1f5f9',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  audioDuration: {
+    color: '#94a3b8',
+    fontSize: 12,
+  },
+  audioDeleteButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  textInputPrice: {
+    backgroundColor: '#1e293b',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    color: '#f1f5f9',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  archivosContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    width: '100%',
+  },
+  archivoItem: {
+    width: '47%',
+    backgroundColor: '#161f2e',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    padding: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  archivoThumb: {
+    width: '100%',
+    height: 140,
+    borderRadius: 10,
+    marginBottom: 4,
+  },
+  videoThumb: {
+    width: '100%',
+    height: 140,
+    borderRadius: 10,
+    marginBottom: 4,
+    backgroundColor: '#0f172a',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+  },
+  archivoLabel: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  archivoModalContent: {
+    backgroundColor: 'rgba(15, 23, 42, 0.95)',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#334155',
+    padding: 20,
+    maxWidth: '95%',
+    maxHeight: '95%',
+    width: '90%',
+    height: '90%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+    flexDirection: 'column',
+  },
+  archivoModalContentMobile: {
+    width: '100%',
+    height: '100%',
+    maxWidth: '100%',
+    maxHeight: '100%',
+    borderRadius: 0,
+    borderWidth: 0,
+    padding: 0,
+  },
+  archivoModalClose: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    zIndex: 10,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    borderRadius: 50,
+    width: 48,
+    height: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  archivoModalCloseMobile: {
+    width: 40,
+    height: 40,
+  },
+  archivoModalImage: {
+    width: '100%',
+    height: 500,
+    resizeMode: 'contain',
+    marginBottom: 12,
+  },
+  archivoModalImageMobile: {
+    height: 300,
+  },
+  archivoModalVideo: {
+    width: '100%',
+    height: 500,
+    marginBottom: 12,
+  },
+  archivoModalVideoMobile: {
+    height: 300,
+  },
+  archivoModalName: {
+    color: '#f1f5f9',
+    fontSize: 14,
+    fontWeight: '600',
+    marginTop: 12,
+  },
+  archivoModalNameMobile: {
+    fontSize: 12,
+  },
+  // ─── Filter panel styles (admin-style) ──────────────────────────
+  filtrosContainer: {
+    backgroundColor: 'rgba(15, 23, 42, 0.8)',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(34, 211, 238, 0.3)',
+    marginHorizontal: 20,
+    marginTop: 20,
+    marginBottom: 20,
+    overflow: 'hidden',
+    shadowColor: '#22d3ee',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 10,
+    elevation: 5,
+  },
+  filtrosContainerMobile: {
+    marginHorizontal: 12,
+    borderRadius: 16,
+    marginBottom: 16,
+    paddingBottom: 8,
+  },
+  filtrosHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  filtrosHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  filtrosTitle: {
+    color: '#22d3ee',
+    fontSize: 14,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  filtrosActiveBadge: {
+    backgroundColor: '#22d3ee',
+    borderRadius: 10,
+    minWidth: 20,
+    height: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+  },
+  filtrosActiveBadgeText: {
+    color: '#0f172a',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  limpiarFiltrosButtonSmall: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.2)',
+  },
+  limpiarFiltrosTextSmall: {
+    color: '#f87171',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  filtroSection: {
+    paddingHorizontal: 20,
+    paddingBottom: 16,
+    gap: 10,
+  },
+  filtroLabel: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+  filtroChips: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  filtroChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    backgroundColor: 'rgba(51, 65, 85, 0.5)',
+    borderWidth: 1,
+    borderColor: 'rgba(71, 85, 105, 0.5)',
+  },
+  filtroChipActive: {
+    backgroundColor: 'rgba(15, 23, 42, 0.8)',
+  },
+  filtroChipText: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  filtroChipTextActive: {
+    fontWeight: '700',
+  },
+  searchFilterContainerPro: {
+    marginHorizontal: 20,
+    marginBottom: 12,
+    gap: 8,
+  },
+  searchFilterContainerMobile: {
+    marginHorizontal: 12,
+    marginBottom: 8,
+    gap: 4,
+  },
+  searchFilterLabelPro: {
+    paddingHorizontal: 4,
+  },
+  searchFilterLabelText: {
+    color: '#64748b',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+  },
+  searchFilterInputWrapperPro: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.8)',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    height: 48,
+    borderWidth: 1,
+    borderColor: 'rgba(51, 65, 85, 0.8)',
+    gap: 10,
+  },
+  searchFilterInputWrapperFocused: {
+    borderColor: 'rgba(6, 182, 212, 0.5)',
+    backgroundColor: 'rgba(6, 182, 212, 0.05)',
+  },
+  searchInputPro: {
+    flex: 1,
+    color: '#f1f5f9',
+    fontSize: 14,
+  },
+  filtrosResultados: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 20,
+    paddingTop: 4,
+    paddingBottom: 16,
+  },
+  filtrosResultadosText: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  noResultadosContainer: {
+    alignItems: 'center',
+    paddingVertical: 48,
+    paddingHorizontal: 24,
+    gap: 8,
+  },
+  noResultadosTitle: {
+    color: '#94a3b8',
+    fontSize: 16,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  noResultadosText: {
+    color: '#64748b',
+    fontSize: 14,
+    textAlign: 'center',
+  },
+  // ─── Admin-style Report Card styles ─────────────────────────────
+  listScroll: { maxHeight: 550 },
+  listScrollMobile: { flex: 1, maxHeight: undefined },
+  listSpacing: { gap: 16, paddingBottom: 20 },
+  reportCard: {
+    backgroundColor: 'rgba(30, 41, 59, 0.7)',
+    borderWidth: 1,
+    borderColor: 'rgba(51, 65, 85, 0.8)',
+    borderRadius: 16,
+    padding: 20,
+    gap: 16,
+    marginHorizontal: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  reportHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  reportHeaderMobile: {
+    gap: 8,
+    paddingRight: 0,
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+  },
+  reportHeaderText: { flex: 1, paddingRight: 12 },
+  reportTitle: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  reportTitleMobile: { fontSize: 14, fontWeight: '600' },
+  reportSubtitle: { color: '#94a3b8', fontSize: 12, marginTop: 2 },
+  reportSubtitleMobile: { fontSize: 11 },
+  reportMeta: { color: '#64748b', fontSize: 12, marginTop: 2 },
+  reportMetaMobile: { fontSize: 11 },
+  reportActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  reportActionsMobile: { gap: 6 },
+  eyeCard: {
+    width: 32,
+    height: 32,
+    backgroundColor: '#334155',
+    borderWidth: 1,
+    borderColor: '#475569',
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  estadoBadge: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderRadius: 999,
+    alignSelf: 'flex-start',
+  },
+  estadoBadgeText: { fontSize: 12, fontWeight: '700' },
+  reportComment: { color: '#cbd5e1', fontSize: 13 },
+  // ─── Professional Action Cards (Audio/Images) ──────────────────
+  proActionCard: {
+    borderRadius: 16,
+    marginTop: 10,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  proActionCardInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 16,
+    gap: 14,
+  },
+  proActionIconWrapper: {
+    width: 44,
+    height: 44,
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  proActionTitle: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  proActionSubtitle: {
+    color: 'rgba(255, 255, 255, 0.7)',
+    fontSize: 12,
+    marginTop: 1,
+  },
+  // ─── Modern Audio/Image Section ───────────────────────────────
+  modernDropzone: {
+    backgroundColor: 'rgba(30, 41, 59, 0.5)',
+    borderRadius: 20,
+    borderWidth: 2,
+    borderStyle: 'dashed',
+    borderColor: 'rgba(56, 189, 248, 0.3)',
+    padding: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 10,
+  },
+  modernAudioCard: {
+    backgroundColor: '#1e293b',
+    borderRadius: 16,
+    padding: 16,
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  waveformContainer: {
+    flex: 1,
+    height: 40,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 3,
+    marginHorizontal: 16,
+  },
+  waveformBar: {
+    width: 3,
+    backgroundColor: '#f87171',
+    borderRadius: 2,
+  },
+  audioControlsContainer: {
+    marginTop: 12,
+  },
+  audioRecordButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ef4444',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    gap: 10,
+  },
+  audioButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  // ─── Info & Error Boxes ───────────────────────────────
+  infoBox: {
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    alignItems: 'center',
+  },
+  infoText: {
+    color: '#94a3b8',
+    fontSize: 14,
+  },
+  errorPanel: {
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.3)',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+  },
+  errorPanelText: {
+    color: '#fca5a5',
+    fontSize: 14,
+  },
+  // ─── List Styles ───────────────────────────────
+  listScroll: {
+    maxHeight: 450,
+  },
+  listScrollMobile: {
+    maxHeight: 350,
+  },
+  listSpacing: {
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    gap: 12,
+  },
+  // ─── Filtros Styles ───────────────────────────────
+  filtroSection: {
+    marginBottom: 8,
+    gap: 8,
+  },
+  filtroLabel: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  filtroChips: {
+    flexDirection: 'row',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  filtroChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 20,
+    backgroundColor: '#1e293b',
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  filtroChipActive: {
+    backgroundColor: 'rgba(15, 23, 42, 0.5)',
+  },
+  filtroChipText: {
+    color: '#94a3b8',
+    fontSize: 12,
+  },
+  filtroChipTextActive: {
+    fontWeight: '600',
+  },
+  // ─── Search Filters ───────────────────────────────
+  searchFilterContainerPro: {
+    padding: 8,
+    backgroundColor: 'rgba(15, 23, 42, 0.3)',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    marginBottom: 8,
+    shadowColor: '#000',
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  searchFilterContainerMobile: {
+    marginBottom: 8,
+  },
+  searchFilterLabelPro: {
+    marginBottom: 6,
+  },
+  searchFilterLabelText: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  searchFilterInputWrapperPro: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  searchFilterInputWrapperFocused: {
+    borderColor: '#06b6d4',
+  },
+  searchInputPro: {
+    flex: 1,
+    color: '#cbd5e1',
+    fontSize: 13,
+  },
+  // ─── Report Card Styles ───────────────────────────────
+  reportCard: {
+    backgroundColor: '#1e293b',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 8,
+  },
+  reportHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    marginBottom: 10,
+  },
+  reportHeaderText: {
+    flex: 1,
+  },
+  reportTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#f8fafc',
+  },
+  reportSubtitle: {
+    fontSize: 12,
+    color: '#94a3b8',
+    marginTop: 2,
+  },
+  reportMeta: {
+    fontSize: 11,
+    color: '#64748b',
+    marginTop: 2,
+  },
+  reportComment: {
+    fontSize: 12,
+    color: '#cbd5e1',
+    marginBottom: 8,
+    lineHeight: 16,
+  },
+  eyeCard: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#06b6d4',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(6, 182, 212, 0.1)',
+  },
+  estadoSoloBadge: {
+    backgroundColor: '#ec489915',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: '#ec489930',
+  },
+  estadoSoloText: {
+    color: '#ec4899',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  // Inventory Table Styles
+  inventoryTableWrapper: {
+    backgroundColor: 'rgba(15, 23, 42, 0.4)',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(236, 72, 153, 0.2)',
+    overflow: 'hidden',
+    margin: 16,
+  },
+  inventoryTableHeader: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(236, 72, 153, 0.1)',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(236, 72, 153, 0.2)',
+  },
+  inventoryHeaderCell: {
+    color: '#ec4899',
+    fontSize: 10,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
+  inventoryTableRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(51, 65, 85, 0.3)',
+  },
+  inventoryCellText: {
+    color: '#cbd5e1',
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  inventoryCellSubText: {
+    color: '#64748b',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  // Column Flexes
+  colTool: { flex: 2 },
+  colCategory: { flex: 1.2 },
+  colObs: { flex: 2.5 },
+  colDate: { flex: 1.2 },
+  colStatus: {
+    flex: 1,
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+  },
+  // Tool Detail Styles
+  toolDetailCard: {
+    width: '90%',
+    maxWidth: 500,
+    backgroundColor: 'rgba(15, 23, 42, 0.95)',
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(236, 72, 153, 0.3)',
+    padding: 24,
+    shadowColor: '#ec4899',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.2,
+    shadowRadius: 20,
+    elevation: 10,
+  },
+  toolDetailHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+    marginBottom: 24,
+  },
+  toolDetailIcon: {
+    width: 56,
+    height: 56,
+    borderRadius: 16,
+    backgroundColor: 'rgba(236, 72, 153, 0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(236, 72, 153, 0.2)',
+  },
+  toolDetailTitle: {
+    color: '#fff',
+    fontSize: 22,
+    fontWeight: '800',
+    flex: 1,
+  },
+  toolDetailInfoRow: {
+    marginBottom: 20,
+  },
+  toolDetailLabel: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    marginBottom: 6,
+  },
+  toolDetailValueContainer: {
+    backgroundColor: 'rgba(30, 41, 59, 0.3)',
+    borderRadius: 12,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(51, 65, 85, 0.5)',
+  },
+  toolDetailValue: {
+    color: '#f1f5f9',
+    fontSize: 15,
+    fontWeight: '600',
+    lineHeight: 22,
+  },
+});
+
