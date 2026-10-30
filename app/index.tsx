@@ -6,7 +6,6 @@ import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import {
   Alert,
-  Image,
   Platform,
   ScrollView,
   Text,
@@ -19,8 +18,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 export default function RoleSelector() {
   const router = useRouter();
   const { width } = useWindowDimensions();
+  const isDesktop = width >= 1024;
+  const isTablet = width >= 768 && width < 1024;
   const isMobile = width < 768;
-  const isSmallScreen = width < 420;
 
   const [loadingRole, setLoadingRole] = useState<string | null>(null);
   const [resetMessage, setResetMessage] = useState<string | null>(null);
@@ -45,9 +45,9 @@ export default function RoleSelector() {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: '#0f172a' }}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: '#060b16' }}>
       <LinearGradient
-        colors={['#0f172a', '#0b1b3d', '#0f172a']}
+        colors={['#060b16', '#091326', '#060b16']}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
         style={{ flex: 1 }}
@@ -56,79 +56,147 @@ export default function RoleSelector() {
           style={{ flex: 1 }}
           contentContainerStyle={{
             flexGrow: 1,
-            justifyContent: 'center',
+            paddingHorizontal: isDesktop ? 48 : isTablet ? 32 : 16,
+            paddingVertical: 24,
             alignItems: 'center',
-            paddingHorizontal: isSmallScreen ? 14 : 24,
-            paddingVertical: 32,
           }}
           showsVerticalScrollIndicator={false}
         >
-          {/* Header con Icono/Logo Genérico */}
-          <View style={{ alignItems: 'center', marginBottom: 24 }}>
+          {/* Top Bar Minimalista (como en Figma) */}
+          <View
+            style={{
+              width: '100%',
+              maxWidth: 1160,
+              flexDirection: 'row',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              paddingBottom: 24,
+              borderBottomWidth: 1,
+              borderBottomColor: 'rgba(255, 255, 255, 0.05)',
+              marginBottom: 36,
+            }}
+          >
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+              <View
+                style={{
+                  width: 28,
+                  height: 28,
+                  borderRadius: 7,
+                  backgroundColor: 'rgba(34, 211, 238, 0.15)',
+                  borderWidth: 1,
+                  borderColor: 'rgba(34, 211, 238, 0.5)',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Ionicons name="hardware-chip-outline" size={16} color="#22d3ee" />
+              </View>
+              <Text style={{ color: '#ffffff', fontWeight: '800', fontSize: 15, letterSpacing: 0.5 }}>
+                ProMant
+              </Text>
+              <Text style={{ color: '#475569', fontSize: 13 }}>/</Text>
+              <Text style={{ color: '#94a3b8', fontSize: 13, fontWeight: '500' }}>
+                Portal de demostración
+              </Text>
+            </View>
+
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <View
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: 4,
+                  backgroundColor: '#22d3ee',
+                  shadowColor: '#22d3ee',
+                  shadowRadius: 6,
+                  shadowOpacity: 0.8,
+                }}
+              />
+              <Text
+                style={{
+                  color: '#64748b',
+                  fontSize: 11,
+                  fontWeight: '700',
+                  letterSpacing: 0.8,
+                  textTransform: 'uppercase',
+                }}
+              >
+                Mantenimiento Industrial • HVAC
+              </Text>
+            </View>
+          </View>
+
+          {/* Hero Section */}
+          <View style={{ alignItems: 'center', marginBottom: 40, maxWidth: 640 }}>
             <View
               style={{
-                width: isSmallScreen ? 76 : 96,
-                height: isSmallScreen ? 76 : 96,
-                borderRadius: 24,
+                width: 68,
+                height: 68,
+                borderRadius: 18,
                 backgroundColor: 'rgba(34, 211, 238, 0.1)',
-                borderWidth: 2,
+                borderWidth: 1.5,
                 borderColor: '#22d3ee',
                 alignItems: 'center',
                 justifyContent: 'center',
-                marginBottom: 16,
+                marginBottom: 18,
                 shadowColor: '#22d3ee',
-                shadowOffset: { width: 0, height: 6 },
+                shadowOffset: { width: 0, height: 4 },
                 shadowOpacity: 0.35,
-                shadowRadius: 14,
+                shadowRadius: 16,
               }}
             >
-              <Ionicons name="hardware-chip-outline" size={isSmallScreen ? 42 : 54} color="#22d3ee" />
+              <Ionicons name="hardware-chip-outline" size={38} color="#22d3ee" />
             </View>
+
             <Text
               style={{
-                fontSize: isSmallScreen ? 26 : 32,
+                fontSize: isDesktop ? 38 : 30,
                 fontWeight: '900',
                 color: '#ffffff',
-                letterSpacing: 2,
+                letterSpacing: 0.8,
+                textAlign: 'center',
               }}
             >
               ProMant
             </Text>
+
             <Text
               style={{
-                fontSize: isSmallScreen ? 13 : 15,
+                fontSize: 15,
                 color: '#38bdf8',
                 fontWeight: '600',
-                marginTop: 2,
+                marginTop: 6,
+                textAlign: 'center',
               }}
             >
               Gestión Integral de Mantenimiento y Servicios
             </Text>
 
-            {/* Badge Demostración Pública */}
+            {/* Pill Badge */}
             <View
               style={{
                 flexDirection: 'row',
                 alignItems: 'center',
-                backgroundColor: 'rgba(34, 211, 238, 0.12)',
-                borderColor: 'rgba(34, 211, 238, 0.4)',
+                backgroundColor: 'rgba(34, 211, 238, 0.08)',
                 borderWidth: 1,
-                paddingHorizontal: 14,
-                paddingVertical: 6,
+                borderColor: 'rgba(34, 211, 238, 0.35)',
+                paddingHorizontal: 12,
+                paddingVertical: 5,
                 borderRadius: 20,
                 marginTop: 14,
+                marginBottom: 12,
               }}
             >
-              <Ionicons name="sparkles" size={15} color="#22d3ee" style={{ marginRight: 6 }} />
+              <Ionicons name="sparkles" size={13} color="#22d3ee" style={{ marginRight: 6 }} />
               <Text
                 style={{
                   color: '#22d3ee',
-                  fontSize: 12,
-                  fontWeight: '700',
-                  letterSpacing: 0.5,
+                  fontSize: 11,
+                  fontWeight: '800',
+                  letterSpacing: 0.8,
                 }}
               >
-                MODO DEMOSTRACIÓN PÚBLICA (EN MEMORIA)
+                MODO DEMO PÚBLICA (EN MEMORIA)
               </Text>
             </View>
 
@@ -137,280 +205,376 @@ export default function RoleSelector() {
                 color: '#94a3b8',
                 fontSize: 13,
                 textAlign: 'center',
-                maxWidth: 580,
-                marginTop: 10,
-                lineHeight: 18,
+                lineHeight: 19,
+                marginTop: 4,
               }}
             >
-              Selecciona el rol con el que deseas probar la plataforma. No se requiere contraseña.
-              Los datos se guardan en caché durante la sesión y se restablecen al reiniciar la página.
+              Explora la plataforma sin contraseña. Elige un rol para probar sus herramientas.
             </Text>
+
+            {resetMessage && (
+              <View
+                style={{
+                  backgroundColor: 'rgba(16, 185, 129, 0.15)',
+                  borderColor: '#10b981',
+                  borderWidth: 1,
+                  paddingHorizontal: 16,
+                  paddingVertical: 8,
+                  borderRadius: 8,
+                  marginTop: 14,
+                }}
+              >
+                <Text style={{ color: '#6ee7b7', fontWeight: '600', fontSize: 13 }}>
+                  {resetMessage}
+                </Text>
+              </View>
+            )}
           </View>
 
-          {/* Toast / Alerta de reinicio */}
-          {resetMessage && (
-            <View
-              style={{
-                backgroundColor: 'rgba(16, 185, 129, 0.2)',
-                borderColor: '#10b981',
-                borderWidth: 1,
-                paddingHorizontal: 16,
-                paddingVertical: 8,
-                borderRadius: 8,
-                marginBottom: 16,
-              }}
-            >
-              <Text style={{ color: '#6ee7b7', fontWeight: '600', fontSize: 13 }}>
-                {resetMessage}
-              </Text>
-            </View>
-          )}
-
-          {/* Contenedor de Tarjetas de Roles */}
+          {/* Section Sub-header */}
           <View
             style={{
               width: '100%',
-              maxWidth: 720,
-              gap: 16,
+              maxWidth: 1160,
+              flexDirection: 'row',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: 16,
             }}
           >
-            {/* ROL 1: ADMINISTRADOR */}
-            <TouchableOpacity
-              activeOpacity={0.85}
-              disabled={loadingRole !== null}
-              onPress={() => handleSelectRole('admin', '/admin')}
-              style={{
-                backgroundColor: 'rgba(30, 41, 59, 0.85)',
-                borderWidth: 1,
-                borderColor: 'rgba(56, 189, 248, 0.35)',
-                borderRadius: 16,
-                padding: isSmallScreen ? 16 : 20,
-                shadowColor: '#000',
-                shadowOffset: { width: 0, height: 4 },
-                shadowOpacity: 0.25,
-                shadowRadius: 8,
-              }}
-            >
-              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1, marginRight: 12 }}>
-                  <View
-                    style={{
-                      width: isSmallScreen ? 44 : 52,
-                      height: isSmallScreen ? 44 : 52,
-                      borderRadius: 14,
-                      backgroundColor: 'rgba(14, 165, 233, 0.2)',
-                      borderWidth: 1,
-                      borderColor: '#0284c7',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      marginRight: 14,
-                    }}
-                  >
-                    <Ionicons name="shield-checkmark" size={isSmallScreen ? 24 : 28} color="#38bdf8" />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                      <Text style={{ color: '#ffffff', fontSize: isSmallScreen ? 16 : 18, fontWeight: '700' }}>
-                        Panel Administrador
-                      </Text>
-                      <View
-                        style={{
-                          backgroundColor: '#0369a1',
-                          paddingHorizontal: 8,
-                          paddingVertical: 2,
-                          borderRadius: 6,
-                        }}
-                      >
-                        <Text style={{ color: '#e0f2fe', fontSize: 10, fontWeight: '800' }}>ROL: ADMIN</Text>
-                      </View>
-                    </View>
-                    <Text style={{ color: '#94a3b8', fontSize: 12, marginTop: 3 }}>
-                      Usuario demo: <Text style={{ color: '#38bdf8' }}>Ing. Roberto Sánchez</Text> (admin@ProMant.com)
-                    </Text>
-                  </View>
-                </View>
-                <Ionicons name="chevron-forward" size={22} color="#38bdf8" />
-              </View>
-
-              <Text style={{ color: '#cbd5e1', fontSize: 12, marginTop: 12, lineHeight: 17 }}>
-                Supervisión global de operaciones: Historial de reportes, cotizaciones pendientes, validación de servicios técnicos, asignación de tareas, gestión de empresas y métricas en tiempo real.
-              </Text>
-
-              <View
-                style={{
-                  marginTop: 14,
-                  backgroundColor: loadingRole === 'admin' ? '#475569' : '#0284c7',
-                  paddingVertical: 10,
-                  borderRadius: 8,
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                <Text style={{ color: '#ffffff', fontWeight: '700', fontSize: 14 }}>
-                  {loadingRole === 'admin' ? 'Entrando...' : 'Ingresar como Administrador →'}
-                </Text>
-              </View>
-            </TouchableOpacity>
-
-            {/* ROL 2: TÉCNICO / EMPLEADO */}
-            <TouchableOpacity
-              activeOpacity={0.85}
-              disabled={loadingRole !== null}
-              onPress={() => handleSelectRole('empleado', '/empleado-panel')}
-              style={{
-                backgroundColor: 'rgba(30, 41, 59, 0.85)',
-                borderWidth: 1,
-                borderColor: 'rgba(245, 158, 11, 0.35)',
-                borderRadius: 16,
-                padding: isSmallScreen ? 16 : 20,
-                shadowColor: '#000',
-                shadowOffset: { width: 0, height: 4 },
-                shadowOpacity: 0.25,
-                shadowRadius: 8,
-              }}
-            >
-              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1, marginRight: 12 }}>
-                  <View
-                    style={{
-                      width: isSmallScreen ? 44 : 52,
-                      height: isSmallScreen ? 44 : 52,
-                      borderRadius: 14,
-                      backgroundColor: 'rgba(245, 158, 11, 0.2)',
-                      borderWidth: 1,
-                      borderColor: '#d97706',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      marginRight: 14,
-                    }}
-                  >
-                    <Ionicons name="construct" size={isSmallScreen ? 24 : 28} color="#fbbf24" />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                      <Text style={{ color: '#ffffff', fontSize: isSmallScreen ? 16 : 18, fontWeight: '700' }}>
-                        Panel Técnico / Empleado
-                      </Text>
-                      <View
-                        style={{
-                          backgroundColor: '#b45309',
-                          paddingHorizontal: 8,
-                          paddingVertical: 2,
-                          borderRadius: 6,
-                        }}
-                      >
-                        <Text style={{ color: '#fef3c7', fontSize: 10, fontWeight: '800' }}>ROL: EMPLEADO</Text>
-                      </View>
-                    </View>
-                    <Text style={{ color: '#94a3b8', fontSize: 12, marginTop: 3 }}>
-                      Usuario demo: <Text style={{ color: '#fbbf24' }}>Carlos Mendoza</Text> (carlos.mendoza@ProMant.com)
-                    </Text>
-                  </View>
-                </View>
-                <Ionicons name="chevron-forward" size={22} color="#fbbf24" />
-              </View>
-
-              <Text style={{ color: '#cbd5e1', fontSize: 12, marginTop: 12, lineHeight: 17 }}>
-                Operación técnica de campo: Reportes asignados, llenado de bitácora técnica (revisión, refacciones, mano de obra), cotizaciones en sitio, evidencias multimedia y herramientas a cargo.
-              </Text>
-
-              <View
-                style={{
-                  marginTop: 14,
-                  backgroundColor: loadingRole === 'empleado' ? '#475569' : '#d97706',
-                  paddingVertical: 10,
-                  borderRadius: 8,
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                <Text style={{ color: '#ffffff', fontWeight: '700', fontSize: 14 }}>
-                  {loadingRole === 'empleado' ? 'Entrando...' : 'Ingresar como Técnico →'}
-                </Text>
-              </View>
-            </TouchableOpacity>
-
-            {/* ROL 3: CLIENTE */}
-            <TouchableOpacity
-              activeOpacity={0.85}
-              disabled={loadingRole !== null}
-              onPress={() => handleSelectRole('cliente', '/cliente-panel')}
-              style={{
-                backgroundColor: 'rgba(30, 41, 59, 0.85)',
-                borderWidth: 1,
-                borderColor: 'rgba(16, 185, 129, 0.35)',
-                borderRadius: 16,
-                padding: isSmallScreen ? 16 : 20,
-                shadowColor: '#000',
-                shadowOffset: { width: 0, height: 4 },
-                shadowOpacity: 0.25,
-                shadowRadius: 8,
-              }}
-            >
-              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1, marginRight: 12 }}>
-                  <View
-                    style={{
-                      width: isSmallScreen ? 44 : 52,
-                      height: isSmallScreen ? 44 : 52,
-                      borderRadius: 14,
-                      backgroundColor: 'rgba(16, 185, 129, 0.2)',
-                      borderWidth: 1,
-                      borderColor: '#059669',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      marginRight: 14,
-                    }}
-                  >
-                    <Ionicons name="business" size={isSmallScreen ? 24 : 28} color="#34d399" />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                      <Text style={{ color: '#ffffff', fontSize: isSmallScreen ? 16 : 18, fontWeight: '700' }}>
-                        Panel Cliente
-                      </Text>
-                      <View
-                        style={{
-                          backgroundColor: '#047857',
-                          paddingHorizontal: 8,
-                          paddingVertical: 2,
-                          borderRadius: 6,
-                        }}
-                      >
-                        <Text style={{ color: '#d1fae5', fontSize: 10, fontWeight: '800' }}>ROL: CLIENTE</Text>
-                      </View>
-                    </View>
-                    <Text style={{ color: '#94a3b8', fontSize: 12, marginTop: 3 }}>
-                      Usuario demo: <Text style={{ color: '#34d399' }}>Mariana Treviño</Text> (Cadena Comercial OXXO)
-                    </Text>
-                  </View>
-                </View>
-                <Ionicons name="chevron-forward" size={22} color="#34d399" />
-              </View>
-
-              <Text style={{ color: '#cbd5e1', fontSize: 12, marginTop: 12, lineHeight: 17 }}>
-                Portal de atención para empresas: Creación de reportes con fotos por sucursal y equipo, seguimiento de estatus en tiempo real, revisión de presupuestos y calificación de satisfacción.
-              </Text>
-
-              <View
-                style={{
-                  marginTop: 14,
-                  backgroundColor: loadingRole === 'cliente' ? '#475569' : '#059669',
-                  paddingVertical: 10,
-                  borderRadius: 8,
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                <Text style={{ color: '#ffffff', fontWeight: '700', fontSize: 14 }}>
-                  {loadingRole === 'cliente' ? 'Entrando...' : 'Ingresar como Cliente →'}
-                </Text>
-              </View>
-            </TouchableOpacity>
+            <Text style={{ color: '#e2e8f0', fontSize: 13, fontWeight: '700', letterSpacing: 0.4 }}>
+              Elige tu experiencia
+            </Text>
+            <Text style={{ color: '#64748b', fontSize: 12, fontWeight: '500' }}>
+              3 roles • Acceso inmediato
+            </Text>
           </View>
 
-          {/* Botón para reiniciar datos de demo */}
-          <View style={{ marginTop: 28, alignItems: 'center' }}>
+          {/* 3 CARDS DE ROL (Grid de 3 columnas en Desktop, Columna en Mobile) */}
+          <View
+            style={{
+              width: '100%',
+              maxWidth: 1160,
+              flexDirection: isDesktop ? 'row' : 'column',
+              gap: 20,
+              justifyContent: 'space-between',
+            }}
+          >
+            {/* 1. ADMINISTRADOR */}
+            <View
+              style={{
+                flex: isDesktop ? 1 : undefined,
+                backgroundColor: 'rgba(15, 23, 42, 0.75)',
+                borderWidth: 1,
+                borderColor: 'rgba(56, 189, 248, 0.25)',
+                borderRadius: 18,
+                padding: 24,
+                justifyContent: 'space-between',
+                shadowColor: '#000',
+                shadowOffset: { width: 0, height: 6 },
+                shadowOpacity: 0.35,
+                shadowRadius: 12,
+              }}
+            >
+              <View>
+                {/* Header card: Icono + Badge */}
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: 20,
+                  }}
+                >
+                  <View
+                    style={{
+                      width: 44,
+                      height: 44,
+                      borderRadius: 12,
+                      backgroundColor: 'rgba(14, 165, 233, 0.15)',
+                      borderWidth: 1,
+                      borderColor: 'rgba(56, 189, 248, 0.4)',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <Ionicons name="shield-checkmark" size={22} color="#38bdf8" />
+                  </View>
+
+                  <View
+                    style={{
+                      backgroundColor: 'rgba(14, 165, 233, 0.18)',
+                      paddingHorizontal: 9,
+                      paddingVertical: 4,
+                      borderRadius: 6,
+                      borderWidth: 1,
+                      borderColor: 'rgba(56, 189, 248, 0.3)',
+                    }}
+                  >
+                    <Text style={{ color: '#38bdf8', fontSize: 10, fontWeight: '800', letterSpacing: 0.6 }}>
+                      ROL: ADMIN
+                    </Text>
+                  </View>
+                </View>
+
+                {/* Título & Usuario Demo */}
+                <Text style={{ color: '#ffffff', fontSize: 20, fontWeight: '800', marginBottom: 4 }}>
+                  Administrador
+                </Text>
+                <Text style={{ color: '#94a3b8', fontSize: 12, fontWeight: '600' }}>
+                  Ing. Roberto Sánchez
+                </Text>
+                <Text style={{ color: '#64748b', fontSize: 11, marginBottom: 14 }}>
+                  admin@promant.com
+                </Text>
+
+                <Text style={{ color: '#cbd5e1', fontSize: 12.5, lineHeight: 18, marginBottom: 18 }}>
+                  Centraliza la operación y toma decisiones con reportes y métricas en tiempo real.
+                </Text>
+
+                {/* Features con checks */}
+                <View style={{ gap: 8, marginBottom: 24 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <Ionicons name="checkmark" size={15} color="#38bdf8" />
+                    <Text style={{ color: '#94a3b8', fontSize: 12 }}>Control de reportes y métricas</Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <Ionicons name="checkmark" size={15} color="#38bdf8" />
+                    <Text style={{ color: '#94a3b8', fontSize: 12 }}>Gestión de equipos y servicios</Text>
+                  </View>
+                </View>
+              </View>
+
+              {/* Botón CTA */}
+              <TouchableOpacity
+                activeOpacity={0.85}
+                disabled={loadingRole !== null}
+                onPress={() => handleSelectRole('admin', '/admin')}
+                style={{
+                  backgroundColor: loadingRole === 'admin' ? '#475569' : '#0284c7',
+                  paddingVertical: 12,
+                  borderRadius: 10,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Text style={{ color: '#ffffff', fontWeight: '700', fontSize: 13.5 }}>
+                  {loadingRole === 'admin' ? 'Entrando...' : 'Ingresar como Administrador →'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* 2. TÉCNICO */}
+            <View
+              style={{
+                flex: isDesktop ? 1 : undefined,
+                backgroundColor: 'rgba(15, 23, 42, 0.75)',
+                borderWidth: 1,
+                borderColor: 'rgba(245, 158, 11, 0.25)',
+                borderRadius: 18,
+                padding: 24,
+                justifyContent: 'space-between',
+                shadowColor: '#000',
+                shadowOffset: { width: 0, height: 6 },
+                shadowOpacity: 0.35,
+                shadowRadius: 12,
+              }}
+            >
+              <View>
+                {/* Header card */}
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: 20,
+                  }}
+                >
+                  <View
+                    style={{
+                      width: 44,
+                      height: 44,
+                      borderRadius: 12,
+                      backgroundColor: 'rgba(245, 158, 11, 0.15)',
+                      borderWidth: 1,
+                      borderColor: 'rgba(245, 158, 11, 0.4)',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <Ionicons name="construct" size={22} color="#fbbf24" />
+                  </View>
+
+                  <View
+                    style={{
+                      backgroundColor: 'rgba(245, 158, 11, 0.18)',
+                      paddingHorizontal: 9,
+                      paddingVertical: 4,
+                      borderRadius: 6,
+                      borderWidth: 1,
+                      borderColor: 'rgba(245, 158, 11, 0.3)',
+                    }}
+                  >
+                    <Text style={{ color: '#fbbf24', fontSize: 10, fontWeight: '800', letterSpacing: 0.6 }}>
+                      ROL: TÉCNICO
+                    </Text>
+                  </View>
+                </View>
+
+                {/* Título & Usuario Demo */}
+                <Text style={{ color: '#ffffff', fontSize: 20, fontWeight: '800', marginBottom: 4 }}>
+                  Técnico
+                </Text>
+                <Text style={{ color: '#94a3b8', fontSize: 12, fontWeight: '600' }}>
+                  Carlos Mendoza
+                </Text>
+                <Text style={{ color: '#64748b', fontSize: 11, marginBottom: 14 }}>
+                  carlos.mendoza@promant.com
+                </Text>
+
+                <Text style={{ color: '#cbd5e1', fontSize: 12.5, lineHeight: 18, marginBottom: 18 }}>
+                  Lleva el control de tus servicios con bitácoras de campo y cotizaciones en sitio.
+                </Text>
+
+                {/* Features con checks */}
+                <View style={{ gap: 8, marginBottom: 24 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <Ionicons name="checkmark" size={15} color="#fbbf24" />
+                    <Text style={{ color: '#94a3b8', fontSize: 12 }}>Bitácoras y evidencias de campo</Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <Ionicons name="checkmark" size={15} color="#fbbf24" />
+                    <Text style={{ color: '#94a3b8', fontSize: 12 }}>Elaboración de cotizaciones</Text>
+                  </View>
+                </View>
+              </View>
+
+              {/* Botón CTA */}
+              <TouchableOpacity
+                activeOpacity={0.85}
+                disabled={loadingRole !== null}
+                onPress={() => handleSelectRole('empleado', '/empleado-panel')}
+                style={{
+                  backgroundColor: loadingRole === 'empleado' ? '#475569' : '#d97706',
+                  paddingVertical: 12,
+                  borderRadius: 10,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Text style={{ color: '#ffffff', fontWeight: '700', fontSize: 13.5 }}>
+                  {loadingRole === 'empleado' ? 'Entrando...' : 'Ingresar como Técnico →'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* 3. CLIENTE */}
+            <View
+              style={{
+                flex: isDesktop ? 1 : undefined,
+                backgroundColor: 'rgba(15, 23, 42, 0.75)',
+                borderWidth: 1,
+                borderColor: 'rgba(16, 185, 129, 0.25)',
+                borderRadius: 18,
+                padding: 24,
+                justifyContent: 'space-between',
+                shadowColor: '#000',
+                shadowOffset: { width: 0, height: 6 },
+                shadowOpacity: 0.35,
+                shadowRadius: 12,
+              }}
+            >
+              <View>
+                {/* Header card */}
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: 20,
+                  }}
+                >
+                  <View
+                    style={{
+                      width: 44,
+                      height: 44,
+                      borderRadius: 12,
+                      backgroundColor: 'rgba(16, 185, 129, 0.15)',
+                      borderWidth: 1,
+                      borderColor: 'rgba(16, 185, 129, 0.4)',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <Ionicons name="business" size={22} color="#34d399" />
+                  </View>
+
+                  <View
+                    style={{
+                      backgroundColor: 'rgba(16, 185, 129, 0.18)',
+                      paddingHorizontal: 9,
+                      paddingVertical: 4,
+                      borderRadius: 6,
+                      borderWidth: 1,
+                      borderColor: 'rgba(16, 185, 129, 0.3)',
+                    }}
+                  >
+                    <Text style={{ color: '#34d399', fontSize: 10, fontWeight: '800', letterSpacing: 0.6 }}>
+                      ROL: CLIENTE
+                    </Text>
+                  </View>
+                </View>
+
+                {/* Título & Usuario Demo */}
+                <Text style={{ color: '#ffffff', fontSize: 20, fontWeight: '800', marginBottom: 4 }}>
+                  Cliente
+                </Text>
+                <Text style={{ color: '#94a3b8', fontSize: 12, fontWeight: '600' }}>
+                  Mariana Treviño
+                </Text>
+                <Text style={{ color: '#64748b', fontSize: 11, marginBottom: 14 }}>
+                  OXXO
+                </Text>
+
+                <Text style={{ color: '#cbd5e1', fontSize: 12.5, lineHeight: 18, marginBottom: 18 }}>
+                  Reporta incidencias con fotos y da seguimiento a cada solicitud de mantenimiento.
+                </Text>
+
+                {/* Features con checks */}
+                <View style={{ gap: 8, marginBottom: 24 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <Ionicons name="checkmark" size={15} color="#34d399" />
+                    <Text style={{ color: '#94a3b8', fontSize: 12 }}>Tickets con evidencia fotográfica</Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <Ionicons name="checkmark" size={15} color="#34d399" />
+                    <Text style={{ color: '#94a3b8', fontSize: 12 }}>Seguimiento de solicitudes</Text>
+                  </View>
+                </View>
+              </View>
+
+              {/* Botón CTA */}
+              <TouchableOpacity
+                activeOpacity={0.85}
+                disabled={loadingRole !== null}
+                onPress={() => handleSelectRole('cliente', '/cliente-panel')}
+                style={{
+                  backgroundColor: loadingRole === 'cliente' ? '#475569' : '#059669',
+                  paddingVertical: 12,
+                  borderRadius: 10,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Text style={{ color: '#ffffff', fontWeight: '700', fontSize: 13.5 }}>
+                  {loadingRole === 'cliente' ? 'Entrando...' : 'Ingresar como Cliente →'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* Footer minimalista */}
+          <View style={{ marginTop: 40, alignItems: 'center', gap: 10 }}>
             <TouchableOpacity
               onPress={handleResetData}
               activeOpacity={0.7}
@@ -418,20 +582,21 @@ export default function RoleSelector() {
                 flexDirection: 'row',
                 alignItems: 'center',
                 paddingHorizontal: 16,
-                paddingVertical: 10,
+                paddingVertical: 9,
                 borderRadius: 8,
-                backgroundColor: 'rgba(51, 65, 85, 0.6)',
+                backgroundColor: 'rgba(30, 41, 59, 0.4)',
                 borderWidth: 1,
-                borderColor: '#475569',
+                borderColor: 'rgba(255, 255, 255, 0.08)',
               }}
             >
-              <Ionicons name="refresh" size={16} color="#94a3b8" style={{ marginRight: 8 }} />
-              <Text style={{ color: '#cbd5e1', fontSize: 13, fontWeight: '600' }}>
-                Restablecer datos de prueba a estado inicial
+              <Ionicons name="refresh" size={14} color="#94a3b8" style={{ marginRight: 8 }} />
+              <Text style={{ color: '#cbd5e1', fontSize: 12.5, fontWeight: '600' }}>
+                Restablecer datos de prueba
               </Text>
             </TouchableOpacity>
-            <Text style={{ color: '#64748b', fontSize: 11, marginTop: 8 }}>
-              v1.0.0 • Versión Demo Pública • Ejecución en Caché
+
+            <Text style={{ color: '#64748b', fontSize: 11 }}>
+              v1.0 • ProMant Demo Environment
             </Text>
           </View>
         </ScrollView>
