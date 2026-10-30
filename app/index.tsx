@@ -290,8 +290,10 @@ export default function RoleSelector() {
               </Text>
             </View>
 
-            {/* Grid de 3 Cards (Ancho de card 368px aprox en desktop) */}
+            {/* Grid de 3 Cards (Horizontal en desktop con CSS directo y estilo React Native) */}
             <View
+              // @ts-ignore
+              className="promant-cards-grid"
               style={{
                 width: '100%',
                 flexDirection: isDesktop ? 'row' : 'column',
@@ -301,8 +303,11 @@ export default function RoleSelector() {
             >
               {/* ================= CARD 1: ADMINISTRADOR ================= */}
               <View
+                // @ts-ignore
+                className="promant-card-item"
                 style={{
                   flex: isDesktop ? 1 : undefined,
+                  minWidth: isDesktop ? 280 : undefined,
                   backgroundColor: 'rgba(15, 23, 42, 0.75)',
                   borderWidth: 1,
                   borderColor: 'rgba(255, 255, 255, 0.06)',
@@ -423,8 +428,11 @@ export default function RoleSelector() {
 
               {/* ================= CARD 2: TÉCNICO ================= */}
               <View
+                // @ts-ignore
+                className="promant-card-item"
                 style={{
                   flex: isDesktop ? 1 : undefined,
+                  minWidth: isDesktop ? 280 : undefined,
                   backgroundColor: 'rgba(15, 23, 42, 0.75)',
                   borderWidth: 1,
                   borderColor: 'rgba(255, 255, 255, 0.06)',
@@ -545,8 +553,11 @@ export default function RoleSelector() {
 
               {/* ================= CARD 3: CLIENTE ================= */}
               <View
+                // @ts-ignore
+                className="promant-card-item"
                 style={{
                   flex: isDesktop ? 1 : undefined,
+                  minWidth: isDesktop ? 280 : undefined,
                   backgroundColor: 'rgba(15, 23, 42, 0.75)',
                   borderWidth: 1,
                   borderColor: 'rgba(255, 255, 255, 0.06)',

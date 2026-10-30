@@ -8,3 +8,15 @@ input[type="password"]::-ms-reveal,
 input[type="password"]::-ms-clear {
   display: none;
 }
+
+
+/* Layout Grid para Cards de ProMant en Web */
+@media (min-width: 900px) {
+  .promant-cards-grid {
+    flex-direction: row !important;
+  }
+  .promant-card-item {
+    flex: 1 1 0% !important;
+    max-width: 33.333% !important;
+  }
+}
