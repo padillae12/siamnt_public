@@ -1392,7 +1392,7 @@ function AdminPanelContent() {
     </div>
 
     <!-- ═══ FOOTER ═══ -->
-    <div class="pdf-footer">si-mant.com</div>
+    <div class="pdf-footer">MantPro - Sistema Integral de Mantenimiento</div>
           </div>
         </td>
       </tr>
@@ -1404,26 +1404,18 @@ function AdminPanelContent() {
       // 3. Generación (Web)
       if (Platform.OS === 'web') {
         try {
-          const response = await fetch(`${getApiBaseUrl()}/pdf/generate`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ html: htmlTemplate })
-          });
-          if (!response.ok) throw new Error('Error al generar PDF');
-          const arrayBuffer = await response.arrayBuffer();
-          const blob = new Blob([arrayBuffer], { type: 'application/pdf' });
-          const url = URL.createObjectURL(blob);
-          const link = document.createElement('a');
-          link.href = url;
-          link.download = `Reporte_${reporte.id}_Admin.pdf`;
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
-          setTimeout(() => URL.revokeObjectURL(url), 100);
-          Alert.alert('PDF Descargado', 'El archivo se ha guardado en tu carpeta de descargas.', [{ text: 'OK' }]);
+          const printWindow = window.open('', '_blank');
+          if (printWindow) {
+            printWindow.document.write(htmlTemplate);
+            printWindow.document.close();
+            printWindow.focus();
+            setTimeout(() => {
+              printWindow.print();
+            }, 300);
+          }
         } catch (error) {
           console.error('[PDF-ADMIN] Error:', error);
-          Alert.alert('Error', 'No se pudo generar el PDF');
+          Alert.alert('Error', 'No se pudo abrir la vista de impresión');
         }
       } else {
         // Generación móvil usando expo-print + expo-sharing

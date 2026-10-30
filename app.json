@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "SIMANT",
-    "slug": "simant2",
+    "name": "ProMant",
+    "slug": "ProMant",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/logosimant.png",

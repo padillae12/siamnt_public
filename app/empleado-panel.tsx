@@ -982,7 +982,7 @@ function EmpleadoPanelContent() {
     </div>
 
     <!-- ═══ FOOTER ═══ -->
-    <div class="pdf-footer">si-mant.com</div>
+    <div class="pdf-footer">MantPro - Sistema Integral de Mantenimiento</div>
           </div>
         </td>
       </tr>
@@ -994,27 +994,18 @@ function EmpleadoPanelContent() {
       // --- GENERACIÓN (Web)
       if (Platform.OS === 'web') {
         try {
-          console.log('[PDF] Enviando petición al servidor');
-          const response = await fetch(`https://si-mant.com/api/pdf/generate`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ html: htmlTemplate })
-          });
-          if (!response.ok) throw new Error('Error al generar PDF');
-          const arrayBuffer = await response.arrayBuffer();
-          const blob = new Blob([arrayBuffer], { type: 'application/pdf' });
-          const url = URL.createObjectURL(blob);
-          const link = document.createElement('a');
-          link.href = url;
-          link.download = 'Reporte_' + reporte.id + '_' + new Date().getTime() + '.pdf';
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
-          setTimeout(() => URL.revokeObjectURL(url), 100);
-          Alert.alert('PDF Descargado', 'El archivo se ha guardado en tu carpeta de descargas.', [{ text: 'OK' }]);
+          const printWindow = window.open('', '_blank');
+          if (printWindow) {
+            printWindow.document.write(htmlTemplate);
+            printWindow.document.close();
+            printWindow.focus();
+            setTimeout(() => {
+              printWindow.print();
+            }, 300);
+          }
         } catch (error) {
           console.error('[PDF] Error:', error);
-          Alert.alert('Error', 'No se pudo generar el PDF');
+          Alert.alert('Error', 'No se pudo abrir la vista de impresión');
         }
       } else {
         // Generación móvil usando expo-print + expo-sharing
@@ -1347,7 +1338,7 @@ function EmpleadoPanelContent() {
     </div>
 
     <!-- FOOTER -->
-    <div class="pdf-footer">si-mant.com</div>
+    <div class="pdf-footer">MantPro - Sistema Integral de Mantenimiento</div>
         </td>
       </tr>
     </tbody>
@@ -1356,23 +1347,21 @@ function EmpleadoPanelContent() {
 </html>`;
 
       if (Platform.OS === 'web') {
-        const response = await fetch(`https://si-mant.com/api/pdf/generate`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ html: htmlTemplate })
-        });
-        if (!response.ok) throw new Error('Error al generar PDF');
-        const arrayBuffer = await response.arrayBuffer();
-        const blob = new Blob([arrayBuffer], { type: 'application/pdf' });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `VistaPrevia_Reporte_${reporte.id}.pdf`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        setTimeout(() => URL.revokeObjectURL(url), 100);
-        showToast('Vista previa descargada. Revísala y si está correcta, haz clic en Enviar Análisis.', 'info');
+        try {
+          const printWindow = window.open('', '_blank');
+          if (printWindow) {
+            printWindow.document.write(htmlTemplate);
+            printWindow.document.close();
+            printWindow.focus();
+            setTimeout(() => {
+              printWindow.print();
+            }, 300);
+          }
+          showToast('Vista previa abierta para impresión/PDF.', 'info');
+        } catch (error) {
+          console.error('[PDF] Error:', error);
+          Alert.alert('Error', 'No se pudo abrir la vista previa');
+        }
       } else {
         // Generación móvil del borrador
         try {
@@ -1706,7 +1695,7 @@ function EmpleadoPanelContent() {
     </div>
 
     <!-- FOOTER -->
-    <div class="pdf-footer">si-mant.com</div>
+    <div class="pdf-footer">MantPro - Sistema Integral de Mantenimiento</div>
         </td>
       </tr>
     </tbody>
@@ -1715,23 +1704,21 @@ function EmpleadoPanelContent() {
 </html>`;
 
       if (Platform.OS === 'web') {
-        const response = await fetch(`https://si-mant.com/api/pdf/generate`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ html: htmlTemplate })
-        });
-        if (!response.ok) throw new Error('Error al generar PDF');
-        const arrayBuffer = await response.arrayBuffer();
-        const blob = new Blob([arrayBuffer], { type: 'application/pdf' });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `VistaPrevia_Express_${reporte.id}.pdf`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        setTimeout(() => URL.revokeObjectURL(url), 100);
-        showToast('Vista previa descargada. Revísala y si está correcta, haz clic en Finalizar Servicio CSC.', 'info');
+        try {
+          const printWindow = window.open('', '_blank');
+          if (printWindow) {
+            printWindow.document.write(htmlTemplate);
+            printWindow.document.close();
+            printWindow.focus();
+            setTimeout(() => {
+              printWindow.print();
+            }, 300);
+          }
+          showToast('Vista previa abierta para impresión/PDF.', 'info');
+        } catch (error) {
+          console.error('[PDF] Error:', error);
+          Alert.alert('Error', 'No se pudo abrir la vista previa');
+        }
       } else {
         // Generación móvil del borrador express
         try {
