@@ -9,14 +9,43 @@ input[type="password"]::-ms-clear {
   display: none;
 }
 
+/* Retícula de 64px de fondo */
+.promant-bg-grid {
+  background-image: 
+    linear-gradient(to right, rgba(158, 189, 218, 0.031) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(158, 189, 218, 0.031) 1px, transparent 1px);
+  background-size: 64px 64px;
+}
 
-/* Layout Grid para Cards de ProMant en Web */
-@media (min-width: 900px) {
-  .promant-cards-grid {
+/* En Desktop (>= 1024px): Forzar las 3 tarjetas en horizontal */
+@media (min-width: 1024px) {
+  .promant-cards-container {
+    display: flex !important;
     flex-direction: row !important;
+    align-items: stretch !important;
+    justify-content: space-between !important;
+    gap: 24px !important;
+    width: 100% !important;
   }
-  .promant-card-item {
+
+  .promant-card-box {
     flex: 1 1 0% !important;
-    max-width: 33.333% !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+}
+
+/* En Mobile / Tablet (< 1024px): Apiladas en vertical */
+@media (max-width: 1023px) {
+  .promant-cards-container {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 20px !important;
+    width: 100% !important;
+  }
+
+  .promant-card-box {
+    width: 100% !important;
   }
 }
