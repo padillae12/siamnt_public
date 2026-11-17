@@ -176,6 +176,12 @@ function EmpleadoPanelContent() {
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [recordingInterval, setRecordingInterval] = useState<any>(null);
 
+  // Estados y Refs para Dictado por Voz Nativo (Web Speech API sin IA externa)
+  const [dictandoCampo, setDictandoCampo] = useState<string | null>(null);
+  const recognitionRef = useRef<any>(null);
+  const initialTextRef = useRef<string>('');
+  const userStoppedDictadoRef = useRef(false);
+
   // Estados para IMAGENES DE ANALISIS
   const [fotosRevisionUris, setFotosRevisionUris] = useState<string[]>([]);
   const [fotosPostprocesoUris, setFotosPostprocesoUris] = useState<string[]>([]);
@@ -421,6 +427,11 @@ function EmpleadoPanelContent() {
 
   // Función para limpiar todos los estados de Fase 2 y cerrar modal
   const cerrarModalReporteDetalle = () => {
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch (e) {}
+      recognitionRef.current = null;
+    }
+    setDictandoCampo(null);
     setShowReporteDetalle(false);
     setReporteSeleccionado(null);
     setArchivosReporte([]);
@@ -1920,6 +1931,114 @@ function EmpleadoPanelContent() {
     const secs = seconds % 60;
     return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
   };
+
+  // Dictado por Voz Nativo (Web Speech API) - Sin IA externa, 100% nativo y gratuito
+  const detenerDictado = useCallback(() => {
+    userStoppedDictadoRef.current = true;
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {}
+      recognitionRef.current = null;
+    }
+    setDictandoCampo(null);
+  }, []);
+
+  const toggleDictado = useCallback((campoId: string, valorActual: string, actualizarValor: (val: string) => void) => {
+    // Si ya está dictando en este campo, detener
+    if (dictandoCampo === campoId) {
+      detenerDictado();
+      return;
+    }
+
+    // Si estaba dictando en otro campo, detener el anterior
+    if (dictandoCampo) {
+      detenerDictado();
+    }
+
+    // Verificar compatibilidad con Web Speech API
+    const SpeechRecognition = typeof window !== 'undefined'
+      ? ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition)
+      : null;
+
+    if (!SpeechRecognition) {
+      showToast('Tu navegador no soporta dictado por voz nativo. Te sugerimos abrir la app en Google Chrome.', 'warning');
+      return;
+    }
+
+    try {
+      userStoppedDictadoRef.current = false;
+      const recognition = new SpeechRecognition();
+      recognition.lang = 'es-MX'; // Español de México
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.maxAlternatives = 1;
+
+      initialTextRef.current = valorActual || '';
+      let transFinalAcumulado = '';
+
+      recognition.onstart = () => {
+        setDictandoCampo(campoId);
+        showToast('🎙️ Micrófono activado. Habla y se escribirá directamente...', 'info');
+      };
+
+      recognition.onresult = (event: any) => {
+        let transInterim = '';
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          const res = event.results[i];
+          if (res.isFinal) {
+            const texto = res[0].transcript.trim();
+            if (texto) {
+              transFinalAcumulado += (transFinalAcumulado ? ' ' : '') + texto;
+            }
+          } else {
+            transInterim += res[0].transcript;
+          }
+        }
+
+        const dictadoActual = (transFinalAcumulado + (transInterim ? ' ' + transInterim : '')).trim();
+        if (dictadoActual) {
+          const base = initialTextRef.current.trim();
+          const textoCompleto = base ? `${base} ${dictadoActual}` : dictadoActual;
+          actualizarValor(textoCompleto);
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        console.warn('[Dictado] Error de reconocimiento:', event.error);
+        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+          showToast('Permiso de micrófono no otorgado. Concede permisos para dictar.', 'error');
+          detenerDictado();
+        } else if (event.error === 'network') {
+          showToast('Revisa tu conexión para el dictado por voz de Google.', 'warning');
+          detenerDictado();
+        }
+      };
+
+      recognition.onend = () => {
+        setDictandoCampo((actual) => (actual === campoId ? null : actual));
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+    } catch (err) {
+      console.error('[Dictado] Error al iniciar:', err);
+      showToast('No se pudo iniciar el dictado por voz', 'error');
+      detenerDictado();
+    }
+  }, [dictandoCampo, detenerDictado]);
+
+  // Limpiar dictado al desmontar
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch (e) {}
+        recognitionRef.current = null;
+      }
+    };
+  }, []);
 
   const confirmarEnvioAnalisis = () => {
     if (!descripcionTrabajo.trim()) {
@@ -3676,9 +3795,38 @@ function EmpleadoPanelContent() {
                 {/* Sección de Análisis para el Técnico */}
                 {reporteSeleccionado.estado === 'asignado' ? (
                   <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginTop: 16 }]}>
-                    <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, color: '#f59e0b', fontWeight: 'bold' }]}>
-                      ANALISIS GENERAL(ESCRIBIR AQUI LA INFORMACION MPORTANTE Y NECESARIA)
-                    </Text>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, flexWrap: 'wrap', gap: 6 }}>
+                      <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, color: '#f59e0b', fontWeight: 'bold', marginBottom: 0 }]}>
+                        ANALISIS GENERAL(ESCRIBIR AQUI LA INFORMACION MPORTANTE Y NECESARIA)
+                      </Text>
+                      <TouchableOpacity
+                        style={[
+                          styles.dictadoButton,
+                          dictandoCampo === 'analisis_asignado' && styles.dictadoButtonActive
+                        ]}
+                        onPress={() => toggleDictado('analisis_asignado', descripcionTrabajo, setDescripcionTrabajo)}
+                        activeOpacity={0.7}
+                      >
+                        <Ionicons
+                          name={dictandoCampo === 'analisis_asignado' ? "mic" : "mic-outline"}
+                          size={15}
+                          color={dictandoCampo === 'analisis_asignado' ? "#ef4444" : "#38bdf8"}
+                        />
+                        <Text style={[styles.dictadoButtonText, { fontFamily }, dictandoCampo === 'analisis_asignado' && { color: '#ef4444' }]}>
+                          {dictandoCampo === 'analisis_asignado' ? 'Detener dictado' : 'Dictar por voz 🎙️'}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    {dictandoCampo === 'analisis_asignado' && (
+                      <View style={styles.dictadoIndicador}>
+                        <View style={[styles.recordingPulse, { width: 8, height: 8, backgroundColor: '#ef4444' }]} />
+                        <Text style={[styles.dictadoIndicadorText, { fontFamily }]}>
+                          Escuchando... Habla y se escribirá directamente en el cuadro de texto
+                        </Text>
+                      </View>
+                    )}
+
                     <TextInput
                       style={[styles.textInputArea, isMobile && styles.textInputAreaMobile, { fontFamily, minHeight: 100 }]}
                       placeholder="Reporta aquí qué partes del equipo no están funcionando o qué análisis realizaste..."
@@ -3893,7 +4041,36 @@ function EmpleadoPanelContent() {
                     {reporteSeleccionado.estado === 'aceptado_por_cliente' || reporteSeleccionado.estado === 'cotizado' ? (
                       <>
                         <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginBottom: 16 }]}>
-                          <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Reparación Realizada</Text>
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, flexWrap: 'wrap', gap: 6 }}>
+                            <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, marginBottom: 0 }]}>Reparación Realizada</Text>
+                            <TouchableOpacity
+                              style={[
+                                styles.dictadoButton,
+                                dictandoCampo === 'reparacion_fase2' && styles.dictadoButtonActive
+                              ]}
+                              onPress={() => toggleDictado('reparacion_fase2', reparacion, setReparacion)}
+                              activeOpacity={0.7}
+                            >
+                              <Ionicons
+                                name={dictandoCampo === 'reparacion_fase2' ? "mic" : "mic-outline"}
+                                size={15}
+                                color={dictandoCampo === 'reparacion_fase2' ? "#ef4444" : "#38bdf8"}
+                              />
+                              <Text style={[styles.dictadoButtonText, { fontFamily }, dictandoCampo === 'reparacion_fase2' && { color: '#ef4444' }]}>
+                                {dictandoCampo === 'reparacion_fase2' ? 'Detener dictado' : 'Dictar por voz 🎙️'}
+                              </Text>
+                            </TouchableOpacity>
+                          </View>
+
+                          {dictandoCampo === 'reparacion_fase2' && (
+                            <View style={styles.dictadoIndicador}>
+                              <View style={[styles.recordingPulse, { width: 8, height: 8, backgroundColor: '#ef4444' }]} />
+                              <Text style={[styles.dictadoIndicadorText, { fontFamily }]}>
+                                Escuchando... Habla y se escribirá directamente en el cuadro de texto
+                              </Text>
+                            </View>
+                          )}
+
                           <TextInput
                             style={[styles.textInputArea, isMobile && styles.textInputAreaMobile, { fontFamily }]}
                             placeholder="Detalla lo que fue reparado..."
@@ -4772,9 +4949,38 @@ function EmpleadoPanelContent() {
                     <Text style={{ fontFamily, color: '#f59e0b', fontWeight: 'bold', fontSize: 16, marginBottom: 12 }}>1. ANÁLISIS GENERAL</Text>
 
                     <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile]}>
-                      <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>
-                        ANALISIS GENERAL (Documenta el problema)
-                      </Text>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, flexWrap: 'wrap', gap: 6 }}>
+                        <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, marginBottom: 0 }]}>
+                          ANALISIS GENERAL (Documenta el problema)
+                        </Text>
+                        <TouchableOpacity
+                          style={[
+                            styles.dictadoButton,
+                            dictandoCampo === 'analisis_express' && styles.dictadoButtonActive
+                          ]}
+                          onPress={() => toggleDictado('analisis_express', descripcionTrabajo, setDescripcionTrabajo)}
+                          activeOpacity={0.7}
+                        >
+                          <Ionicons
+                            name={dictandoCampo === 'analisis_express' ? "mic" : "mic-outline"}
+                            size={15}
+                            color={dictandoCampo === 'analisis_express' ? "#ef4444" : "#38bdf8"}
+                          />
+                          <Text style={[styles.dictadoButtonText, { fontFamily }, dictandoCampo === 'analisis_express' && { color: '#ef4444' }]}>
+                            {dictandoCampo === 'analisis_express' ? 'Detener dictado' : 'Dictar por voz 🎙️'}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      {dictandoCampo === 'analisis_express' && (
+                        <View style={styles.dictadoIndicador}>
+                          <View style={[styles.recordingPulse, { width: 8, height: 8, backgroundColor: '#ef4444' }]} />
+                          <Text style={[styles.dictadoIndicadorText, { fontFamily }]}>
+                            Escuchando... Habla y se escribirá directamente en el cuadro de texto
+                          </Text>
+                        </View>
+                      )}
+
                       <TextInput
                         style={[styles.textInputArea, { fontFamily }]}
                         value={descripcionTrabajo}
@@ -5099,9 +5305,38 @@ function EmpleadoPanelContent() {
 
                   {/* Campos de cotización */}
                   <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginTop: 24 }]}>
-                    <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, color: '#f59e0b' }]}>
-                      ANALISIS GENERAL(ESCRIBIR AQUI LA INFORMACION MPORTANTE Y NECESARIA)
-                    </Text>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, flexWrap: 'wrap', gap: 6 }}>
+                      <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, color: '#f59e0b', marginBottom: 0 }]}>
+                        ANALISIS GENERAL(ESCRIBIR AQUI LA INFORMACION MPORTANTE Y NECESARIA)
+                      </Text>
+                      <TouchableOpacity
+                        style={[
+                          styles.dictadoButton,
+                          dictandoCampo === 'analisis_cotizar' && styles.dictadoButtonActive
+                        ]}
+                        onPress={() => toggleDictado('analisis_cotizar', descripcionTrabajo, setDescripcionTrabajo)}
+                        activeOpacity={0.7}
+                      >
+                        <Ionicons
+                          name={dictandoCampo === 'analisis_cotizar' ? "mic" : "mic-outline"}
+                          size={15}
+                          color={dictandoCampo === 'analisis_cotizar' ? "#ef4444" : "#38bdf8"}
+                        />
+                        <Text style={[styles.dictadoButtonText, { fontFamily }, dictandoCampo === 'analisis_cotizar' && { color: '#ef4444' }]}>
+                          {dictandoCampo === 'analisis_cotizar' ? 'Detener dictado' : 'Dictar por voz 🎙️'}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    {dictandoCampo === 'analisis_cotizar' && (
+                      <View style={styles.dictadoIndicador}>
+                        <View style={[styles.recordingPulse, { width: 8, height: 8, backgroundColor: '#ef4444' }]} />
+                        <Text style={[styles.dictadoIndicadorText, { fontFamily }]}>
+                          Escuchando... Habla y se escribirá directamente en el cuadro de texto
+                        </Text>
+                      </View>
+                    )}
+
                     <TextInput
                       style={[styles.textInputArea, { fontFamily }]}
                       value={descripcionTrabajo}
@@ -6451,6 +6686,44 @@ const styles = StyleSheet.create({
     fontSize: 15,
     minHeight: 100,
     textAlignVertical: 'top',
+  },
+  dictadoButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(56, 189, 248, 0.12)',
+    borderWidth: 1,
+    borderColor: '#38bdf8',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    gap: 6,
+  },
+  dictadoButtonActive: {
+    backgroundColor: 'rgba(239, 68, 68, 0.2)',
+    borderColor: '#ef4444',
+  },
+  dictadoButtonText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#38bdf8',
+  },
+  dictadoIndicador: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.3)',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 8,
+  },
+  dictadoIndicadorText: {
+    fontSize: 12,
+    color: '#f87171',
+    fontWeight: '500',
+    flex: 1,
   },
   audioControlsContainer: {
     backgroundColor: '#1e293b',
