@@ -178,9 +178,14 @@ function EmpleadoPanelContent() {
 
   // Estados y Refs para Dictado por Voz Nativo (Web Speech API sin IA externa)
   const [dictandoCampo, setDictandoCampo] = useState<string | null>(null);
+  const [dictadoStatusMsg, setDictadoStatusMsg] = useState<string>('');
+  const [dictadoErrorMsg, setDictadoErrorMsg] = useState<string>('');
+  const [dictadoErrorCampo, setDictadoErrorCampo] = useState<string | null>(null);
   const recognitionRef = useRef<any>(null);
   const initialTextRef = useRef<string>('');
+  const latestTextRef = useRef<string>('');
   const userStoppedDictadoRef = useRef(false);
+  const fatalDictadoErrorRef = useRef(false);
 
   // Estados para IMAGENES DE ANALISIS
   const [fotosRevisionUris, setFotosRevisionUris] = useState<string[]>([]);
@@ -1856,6 +1861,13 @@ function EmpleadoPanelContent() {
       setIsRecording(true);
       setRecordingDuration(0);
 
+      // Si estamos en web de escritorio y no está dictando aún, activar transcripción simultánea en la caja de texto
+      const isAndroid = typeof navigator !== 'undefined' && /android/i.test(navigator.userAgent);
+      if (typeof window !== 'undefined' && !isAndroid && !dictandoCampo) {
+        const targetField = showCotizarModal ? 'analisis_cotizar' : 'analisis_asignado';
+        toggleDictado(targetField, descripcionTrabajo, setDescripcionTrabajo);
+      }
+
       const interval = setInterval(() => {
         setRecordingDuration(prev => prev + 1);
       }, 1000);
@@ -1932,19 +1944,35 @@ function EmpleadoPanelContent() {
     return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
   };
 
+  const aplicarTextoDictado = (campoId: string, texto: string) => {
+    if (campoId.startsWith('analisis')) {
+      setDescripcionTrabajo(texto);
+    } else if (campoId.startsWith('reparacion')) {
+      setReparacion(texto);
+    } else if (campoId.startsWith('materiales')) {
+      setMaterialesRefacciones(texto);
+    } else if (campoId.startsWith('recomendaciones_adic')) {
+      setRecomendacionesAdicionales(texto);
+    } else if (campoId.startsWith('recomendaciones')) {
+      setRecomendaciones(texto);
+    }
+  };
+
   // Dictado por Voz Nativo (Web Speech API) - Sin IA externa, 100% nativo y gratuito
   const detenerDictado = useCallback(() => {
     userStoppedDictadoRef.current = true;
     if (recognitionRef.current) {
       try {
+        recognitionRef.current.onend = null;
         recognitionRef.current.stop();
       } catch (e) {}
       recognitionRef.current = null;
     }
     setDictandoCampo(null);
+    setDictadoStatusMsg('');
   }, []);
 
-  const toggleDictado = useCallback((campoId: string, valorActual: string, actualizarValor: (val: string) => void) => {
+  const toggleDictado = (campoId: string, valorActual: string, actualizarValor?: (val: string) => void) => {
     // Si ya está dictando en este campo, detener
     if (dictandoCampo === campoId) {
       detenerDictado();
@@ -1956,77 +1984,170 @@ function EmpleadoPanelContent() {
       detenerDictado();
     }
 
+    setDictadoErrorMsg('');
+    setDictadoErrorCampo(null);
+
     // Verificar compatibilidad con Web Speech API
     const SpeechRecognition = typeof window !== 'undefined'
       ? ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition)
       : null;
 
     if (!SpeechRecognition) {
-      showToast('Tu navegador no soporta dictado por voz nativo. Te sugerimos abrir la app en Google Chrome.', 'warning');
+      const msg = '⚠️ Tu navegador no soporta dictado por voz nativo. Abre la página en Google Chrome, Microsoft Edge o Safari.';
+      setDictadoErrorCampo(campoId);
+      setDictadoErrorMsg(msg);
+      showToast(msg, 'warning');
       return;
     }
 
     try {
       userStoppedDictadoRef.current = false;
-      const recognition = new SpeechRecognition();
-      recognition.lang = 'es-MX'; // Español de México
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.maxAlternatives = 1;
-
+      fatalDictadoErrorRef.current = false;
       initialTextRef.current = valorActual || '';
-      let transFinalAcumulado = '';
+      latestTextRef.current = valorActual || '';
 
-      recognition.onstart = () => {
-        setDictandoCampo(campoId);
-        showToast('🎙️ Micrófono activado. Habla y se escribirá directamente...', 'info');
-      };
+      setDictandoCampo(campoId);
+      setDictadoStatusMsg('⏳ Activando micrófono... Habla claro frente a tu dispositivo');
 
-      recognition.onresult = (event: any) => {
-        let transInterim = '';
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-          const res = event.results[i];
-          if (res.isFinal) {
-            const texto = res[0].transcript.trim();
-            if (texto) {
-              transFinalAcumulado += (transFinalAcumulado ? ' ' : '') + texto;
+      const crearEIniciarInstancia = () => {
+        if (userStoppedDictadoRef.current || fatalDictadoErrorRef.current) return;
+
+        const recognition = new SpeechRecognition();
+        recognition.lang = 'es-MX'; // Español de México
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.maxAlternatives = 1;
+
+        recognition.onstart = () => {
+          setDictandoCampo(campoId);
+          setDictadoStatusMsg('🎙️ Escuchando... Habla ahora y tu voz se escribirá en el recuadro');
+        };
+
+        recognition.onsoundstart = () => {
+          setDictadoStatusMsg('🟢 Detectando audio... procesando tu voz en tiempo real');
+        };
+
+        recognition.onspeechstart = () => {
+          setDictadoStatusMsg('🗣️ Escuchando tu voz... transcribiendo en la caja de texto');
+        };
+
+        recognition.onresult = (event: any) => {
+          let textoSesion = '';
+          for (let i = 0; i < event.results.length; ++i) {
+            const res = event.results[i];
+            if (res && res[0] && res[0].transcript) {
+              textoSesion += res[0].transcript;
             }
-          } else {
-            transInterim += res[0].transcript;
           }
-        }
 
-        const dictadoActual = (transFinalAcumulado + (transInterim ? ' ' + transInterim : '')).trim();
-        if (dictadoActual) {
-          const base = initialTextRef.current.trim();
-          const textoCompleto = base ? `${base} ${dictadoActual}` : dictadoActual;
-          actualizarValor(textoCompleto);
-        }
+          const dictadoActual = textoSesion.trim();
+          if (dictadoActual) {
+            const base = initialTextRef.current.trim();
+            const textoCompleto = base ? `${base} ${dictadoActual}` : dictadoActual;
+            latestTextRef.current = textoCompleto;
+            aplicarTextoDictado(campoId, textoCompleto);
+            if (actualizarValor) {
+              actualizarValor(textoCompleto);
+            }
+            const fragmento = dictadoActual.length > 42 ? '...' + dictadoActual.slice(-42) : dictadoActual;
+            setDictadoStatusMsg(`✍️ Escribiendo: "${fragmento}"`);
+          }
+        };
+
+        recognition.onerror = (event: any) => {
+          console.warn('[Dictado] Evento de reconocimiento:', event.error);
+          if (event.error === 'no-speech') {
+            // Silencio temporal: seguir escuchando sin cortar
+            setDictadoStatusMsg('🎙️ Sigo escuchando... Habla cerca del micrófono');
+            return;
+          }
+          if (event.error === 'aborted' && userStoppedDictadoRef.current) {
+            return;
+          }
+          if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+            fatalDictadoErrorRef.current = true;
+            const msg = '⚠️ Permiso de micrófono bloqueado. Haz clic en el ícono de candado junto a la URL arriba y permite el micrófono.';
+            setDictadoErrorCampo(campoId);
+            setDictadoErrorMsg(msg);
+            showToast(msg, 'error');
+            detenerDictado();
+          } else if (event.error === 'network') {
+            fatalDictadoErrorRef.current = true;
+            const msg = '⚠️ Este navegador (ej. Brave u Opera) bloquea el servicio gratuito de voz de Google. Por favor abre ProMant en Google Chrome, Safari o Microsoft Edge.';
+            setDictadoErrorCampo(campoId);
+            setDictadoErrorMsg(msg);
+            showToast(msg, 'warning');
+            detenerDictado();
+          } else if (event.error === 'audio-capture') {
+            fatalDictadoErrorRef.current = true;
+            const msg = '⚠️ No se detectó ningún micrófono disponible o está ocupado por otra aplicación.';
+            setDictadoErrorCampo(campoId);
+            setDictadoErrorMsg(msg);
+            showToast(msg, 'error');
+            detenerDictado();
+          }
+        };
+
+        recognition.onend = () => {
+          // Si el usuario NO detuvo el dictado y no hubo error fatal, reiniciar automáticamente para no cortar pausas
+          if (!userStoppedDictadoRef.current && !fatalDictadoErrorRef.current) {
+            initialTextRef.current = latestTextRef.current;
+            try {
+              recognition.start();
+              return;
+            } catch (e) {
+              // Si la instancia anterior no permite re-start, crear una limpia
+              try {
+                setTimeout(() => {
+                  if (!userStoppedDictadoRef.current && !fatalDictadoErrorRef.current) {
+                    crearEIniciarInstancia();
+                  }
+                }, 150);
+                return;
+              } catch (err2) {}
+            }
+          }
+          setDictandoCampo((actual) => (actual === campoId ? null : actual));
+          setDictadoStatusMsg('');
+        };
+
+        recognitionRef.current = recognition;
+        recognition.start();
       };
 
-      recognition.onerror = (event: any) => {
-        console.warn('[Dictado] Error de reconocimiento:', event.error);
-        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-          showToast('Permiso de micrófono no otorgado. Concede permisos para dictar.', 'error');
-          detenerDictado();
-        } else if (event.error === 'network') {
-          showToast('Revisa tu conexión para el dictado por voz de Google.', 'warning');
-          detenerDictado();
-        }
-      };
-
-      recognition.onend = () => {
-        setDictandoCampo((actual) => (actual === campoId ? null : actual));
-      };
-
-      recognitionRef.current = recognition;
-      recognition.start();
+      crearEIniciarInstancia();
     } catch (err) {
       console.error('[Dictado] Error al iniciar:', err);
-      showToast('No se pudo iniciar el dictado por voz', 'error');
+      const msg = '⚠️ No se pudo iniciar el dictado por voz en este navegador.';
+      setDictadoErrorCampo(campoId);
+      setDictadoErrorMsg(msg);
+      showToast(msg, 'error');
       detenerDictado();
     }
-  }, [dictandoCampo, detenerDictado]);
+  };
+
+  const renderIndicadorDictado = (campoId: string) => (
+    <>
+      {dictandoCampo === campoId && (
+        <View style={styles.dictadoIndicador}>
+          <View style={[styles.recordingPulse, { width: 8, height: 8, backgroundColor: '#ef4444' }]} />
+          <Text style={[styles.dictadoIndicadorText, { fontFamily }]}>
+            {dictadoStatusMsg || '🎙️ Escuchando... Habla y se escribirá directamente en el cuadro de texto'}
+          </Text>
+        </View>
+      )}
+      {dictadoErrorCampo === campoId && Boolean(dictadoErrorMsg) && (
+        <View style={[styles.dictadoIndicador, { backgroundColor: 'rgba(245, 158, 11, 0.15)', borderColor: '#f59e0b' }]}>
+          <Text style={[styles.dictadoIndicadorText, { fontFamily, color: '#fbbf24' }]}>
+            {dictadoErrorMsg}
+          </Text>
+          <TouchableOpacity onPress={() => { setDictadoErrorMsg(''); setDictadoErrorCampo(null); }}>
+            <Ionicons name="close-circle" size={18} color="#fbbf24" />
+          </TouchableOpacity>
+        </View>
+      )}
+    </>
+  );
 
   // Limpiar dictado al desmontar
   useEffect(() => {
@@ -3818,14 +3939,7 @@ function EmpleadoPanelContent() {
                       </TouchableOpacity>
                     </View>
 
-                    {dictandoCampo === 'analisis_asignado' && (
-                      <View style={styles.dictadoIndicador}>
-                        <View style={[styles.recordingPulse, { width: 8, height: 8, backgroundColor: '#ef4444' }]} />
-                        <Text style={[styles.dictadoIndicadorText, { fontFamily }]}>
-                          Escuchando... Habla y se escribirá directamente en el cuadro de texto
-                        </Text>
-                      </View>
-                    )}
+                    {renderIndicadorDictado('analisis_asignado')}
 
                     <TextInput
                       style={[styles.textInputArea, isMobile && styles.textInputAreaMobile, { fontFamily, minHeight: 100 }]}
@@ -4062,14 +4176,7 @@ function EmpleadoPanelContent() {
                             </TouchableOpacity>
                           </View>
 
-                          {dictandoCampo === 'reparacion_fase2' && (
-                            <View style={styles.dictadoIndicador}>
-                              <View style={[styles.recordingPulse, { width: 8, height: 8, backgroundColor: '#ef4444' }]} />
-                              <Text style={[styles.dictadoIndicadorText, { fontFamily }]}>
-                                Escuchando... Habla y se escribirá directamente en el cuadro de texto
-                              </Text>
-                            </View>
-                          )}
+                          {renderIndicadorDictado('reparacion_fase2')}
 
                           <TextInput
                             style={[styles.textInputArea, isMobile && styles.textInputAreaMobile, { fontFamily }]}
@@ -4972,14 +5079,7 @@ function EmpleadoPanelContent() {
                         </TouchableOpacity>
                       </View>
 
-                      {dictandoCampo === 'analisis_express' && (
-                        <View style={styles.dictadoIndicador}>
-                          <View style={[styles.recordingPulse, { width: 8, height: 8, backgroundColor: '#ef4444' }]} />
-                          <Text style={[styles.dictadoIndicadorText, { fontFamily }]}>
-                            Escuchando... Habla y se escribirá directamente en el cuadro de texto
-                          </Text>
-                        </View>
-                      )}
+                      {renderIndicadorDictado('analisis_express')}
 
                       <TextInput
                         style={[styles.textInputArea, { fontFamily }]}
@@ -5055,7 +5155,27 @@ function EmpleadoPanelContent() {
                     <Text style={{ fontFamily, color: '#10b981', fontWeight: 'bold', fontSize: 16, marginBottom: 12 }}>2. TRABAJO REALIZADO</Text>
 
                     <View style={[styles.detailFieldGroup, isMobile && styles.detailFieldGroupMobile, { marginBottom: 16 }]}>
-                      <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily }]}>Reparación Realizada</Text>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, flexWrap: 'wrap', gap: 6 }}>
+                        <Text style={[styles.detailFieldLabel, isMobile && styles.detailFieldLabelMobile, { fontFamily, marginBottom: 0 }]}>Reparación Realizada</Text>
+                        <TouchableOpacity
+                          style={[
+                            styles.dictadoButton,
+                            dictandoCampo === 'reparacion_express' && styles.dictadoButtonActive
+                          ]}
+                          onPress={() => toggleDictado('reparacion_express', reparacion, setReparacion)}
+                          activeOpacity={0.7}
+                        >
+                          <Ionicons
+                            name={dictandoCampo === 'reparacion_express' ? "mic" : "mic-outline"}
+                            size={15}
+                            color={dictandoCampo === 'reparacion_express' ? "#ef4444" : "#38bdf8"}
+                          />
+                          <Text style={[styles.dictadoButtonText, { fontFamily }, dictandoCampo === 'reparacion_express' && { color: '#ef4444' }]}>
+                            {dictandoCampo === 'reparacion_express' ? 'Detener dictado' : 'Dictar por voz 🎙️'}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                      {renderIndicadorDictado('reparacion_express')}
                       <TextInput
                         style={[styles.textInputArea, isMobile && styles.textInputAreaMobile, { fontFamily }]}
                         placeholder="Detalla lo que fue reparado..."
@@ -5328,14 +5448,7 @@ function EmpleadoPanelContent() {
                       </TouchableOpacity>
                     </View>
 
-                    {dictandoCampo === 'analisis_cotizar' && (
-                      <View style={styles.dictadoIndicador}>
-                        <View style={[styles.recordingPulse, { width: 8, height: 8, backgroundColor: '#ef4444' }]} />
-                        <Text style={[styles.dictadoIndicadorText, { fontFamily }]}>
-                          Escuchando... Habla y se escribirá directamente en el cuadro de texto
-                        </Text>
-                      </View>
-                    )}
+                    {renderIndicadorDictado('analisis_cotizar')}
 
                     <TextInput
                       style={[styles.textInputArea, { fontFamily }]}
